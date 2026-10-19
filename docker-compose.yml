@@ -1,0 +1,32 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: whiteboard
+      POSTGRES_PASSWORD: whiteboard
+      POSTGRES_DB: whiteboard
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./server/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+
+  server:
+    build: ./server
+    ports:
+      - "3001:3001"
+    environment:
+      DATABASE_URL: postgres://whiteboard:whiteboard@db:5432/whiteboard
+    depends_on:
+      - db
+
+  client:
+    build: ./client
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_WS_URL: ws://localhost:3001
+      VITE_API_URL: http://localhost:3001
+
+volumes:
+  pgdata:

@@ -1,0 +1,2 @@
+-- This file runs automatically when the Postgres container starts for the first time.
+-- Define your tables here.
