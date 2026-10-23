@@ -6,9 +6,10 @@ from http.cookies import SimpleCookie
 from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
-from app import auth, canvases
 from asyncpg import UniqueViolationError
 from fastapi import HTTPException, Response
+
+from app import auth, canvases
 
 
 class MemoryDatabase:
@@ -132,7 +133,7 @@ class MemoryPool:
         yield self.connection
 
 
-class AuthEndpointTests(unittest.TestCase):
+class EndpointHandlerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.database = MemoryDatabase()
         self.pool = MemoryPool(self.database)
