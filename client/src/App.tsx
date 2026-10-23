@@ -9,11 +9,13 @@ export default function App() {
   return (
     <Routes>
       <Route path="/" element={<Navigate to="/login" replace />} />
-      <Route path="/login" element={<PublicAuthPage mode="sign-in" />} />
-      <Route path="/signup" element={<PublicAuthPage mode="sign-up" />} />
-      <Route element={<RequireAuth />}>
-        <Route path="/canvases" element={<DashboardPage />} />
-        <Route path="/canvases/:canvasId" element={<EditorPage />} />
+      <Route element={<SessionBoundary />}>
+        <Route path="/login" element={<PublicAuthPage mode="sign-in" />} />
+        <Route path="/signup" element={<PublicAuthPage mode="sign-up" />} />
+        <Route element={<RequireAuth />}>
+          <Route path="/canvases" element={<DashboardPage />} />
+          <Route path="/canvases/:canvasId" element={<EditorPage />} />
+        </Route>
       </Route>
       <Route path="*" element={<Navigate to="/login" replace />} />
     </Routes>
@@ -26,13 +28,12 @@ function PublicAuthPage({ mode }: { mode: "sign-in" | "sign-up" }) {
   return <SignInPage mode={mode} />;
 }
 
-function RequireAuth() {
+function SessionBoundary() {
   const { state, retrySessionCheck } = useAuth();
 
   if (state.kind === "checking") {
     return <main className="auth-check" role="status">Checking your session…</main>;
   }
-  if (state.kind === "anonymous") return <Navigate to="/login" replace />;
   if (state.kind === "unavailable") {
     return (
       <main className="auth-check">
@@ -45,4 +46,9 @@ function RequireAuth() {
   }
 
   return <Outlet />;
+}
+
+function RequireAuth() {
+  const { state } = useAuth();
+  return state.kind === "authenticated" ? <Outlet /> : <Navigate to="/login" replace />;
 }
