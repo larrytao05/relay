@@ -223,6 +223,11 @@
   transform: translateY(1px);
 }
 
+.sign-in-submit:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
 .signup-prompt {
   margin: 22px 0 0;
   color: #718092;

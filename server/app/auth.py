@@ -221,6 +221,7 @@ async def logout(
         samesite="lax",
         path="/",
     )
+    response.status_code = status.HTTP_204_NO_CONTENT
     return response
 
 

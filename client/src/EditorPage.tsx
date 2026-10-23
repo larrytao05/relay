@@ -1,4 +1,8 @@
-import { Link } from "react-router";
+import { useEffect, useState } from "react";
+import { Link, useParams } from "react-router";
+import { canvasApi, CanvasApiError } from "./api/canvases.ts";
+import { useAuth } from "./AuthContext.tsx";
+import type { CanvasDetail } from "./types.ts";
 
 const colors = [
   { name: "Blue", value: "#dce6ff", className: "blue" },
@@ -79,10 +83,10 @@ function RemoteCursor({ name, className }: { name: string; className: string }) 
   );
 }
 
-function Whiteboard() {
+function Whiteboard({ title }: { title: string }) {
   return (
     <div className="editor-stage" aria-label="Whiteboard preview">
-      <div className="editor-canvas-label">Checkout flow</div>
+      <div className="editor-canvas-label">{title}</div>
       <div className="editor-board-wrap">
         <div className="editor-board">
           <svg viewBox="0 0 820 503" role="img" aria-label="Whiteboard with a selected payment card, order status, and note">
@@ -159,6 +163,64 @@ function Inspector() {
 }
 
 export default function EditorPage() {
+  const { canvasId } = useParams();
+  const { retrySessionCheck } = useAuth();
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [state, setState] = useState<EditorState>({ kind: "loading" });
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setState({ kind: "loading" });
+    if (!canvasId) {
+      setState({ kind: "error", message: "This canvas link is missing its ID." });
+      return () => controller.abort();
+    }
+
+    void canvasApi.get(canvasId, controller.signal).then(
+      (detail) => {
+        if (!controller.signal.aborted) setState({ kind: "ready", detail });
+      },
+      (error: unknown) => {
+        if (controller.signal.aborted) return;
+        if (error instanceof CanvasApiError && error.status === 401) {
+          retrySessionCheck();
+          return;
+        }
+        if (error instanceof CanvasApiError && error.status === 404) {
+          setState({ kind: "unavailable" });
+          return;
+        }
+        setState({ kind: "error", message: getEditorErrorMessage(error) });
+      },
+    );
+
+    return () => controller.abort();
+  }, [canvasId, loadAttempt, retrySessionCheck]);
+
+  if (state.kind !== "ready") {
+    return (
+      <>
+        <style>{editorStyles}</style>
+        <main className="editor-page editor-load-state">
+          {state.kind === "loading" ? (
+            <p role="status">Loading canvas…</p>
+          ) : (
+            <section role={state.kind === "unavailable" ? undefined : "alert"}>
+              <h1>{state.kind === "unavailable" ? "Canvas unavailable" : "Couldn't open this canvas"}</h1>
+              <p>{state.kind === "unavailable" ? "This canvas may have been removed or you may no longer have access." : state.message}</p>
+              {state.kind === "error" && (
+                <button type="button" onClick={() => setLoadAttempt((attempt) => attempt + 1)}>
+                  Try again
+                </button>
+              )}
+              <Link to="/canvases">Back to canvases</Link>
+            </section>
+          )}
+        </main>
+      </>
+    );
+  }
+
   return (
     <>
       <style>{editorStyles}</style>
@@ -171,7 +233,7 @@ export default function EditorPage() {
             </Link>
             <span className="editor-breadcrumb">My canvases /</span>
             <div className="editor-document">
-              <span className="editor-document-title">Checkout flow</span>
+              <span className="editor-document-title">{state.detail.canvas.title}</span>
               <span className="editor-save-status"><i aria-hidden="true" />All changes saved</span>
             </div>
           </div>
@@ -181,12 +243,23 @@ export default function EditorPage() {
           </div>
         </header>
         <div className="editor-workspace">
-          <Whiteboard />
+          <Whiteboard title={state.detail.canvas.title} />
           <Inspector />
         </div>
       </main>
     </>
   );
+}
+
+type EditorState =
+  | { kind: "loading" }
+  | { kind: "unavailable" }
+  | { kind: "error"; message: string }
+  | { kind: "ready"; detail: CanvasDetail };
+
+function getEditorErrorMessage(error: unknown): string {
+  if (error instanceof CanvasApiError) return error.message;
+  return "Something went wrong. Try again.";
 }
 
 const editorStyles = `
@@ -207,6 +280,12 @@ const editorStyles = `
   .editor-page button, .editor-page a { font: inherit; }
   .editor-page button { color: inherit; }
   .editor-page button:focus-visible, .editor-page a:focus-visible { outline: 3px solid rgb(73 104 215 / 32%); outline-offset: 2px; }
+  .editor-load-state { display: grid; place-items: center; padding: 24px; text-align: center; }
+  .editor-load-state p { color: var(--editor-muted); }
+  .editor-load-state section { max-width: 420px; }
+  .editor-load-state h1 { font-size: 22px; }
+  .editor-load-state section a { display: inline-block; margin-left: 12px; color: var(--editor-blue); }
+  .editor-load-state button { min-height: 36px; padding: 0 13px; border: 1px solid var(--editor-line); border-radius: 8px; background: #fff; }
   .editor-topbar { position: relative; z-index: 3; display: flex; height: 68px; align-items: center; justify-content: space-between; gap: 16px; padding: 0 22px; border-bottom: 1px solid var(--editor-line); background: #fff; }
   .editor-top-left, .editor-top-right, .editor-brand, .editor-save-status { display: flex; align-items: center; }
   .editor-top-left { min-width: 0; gap: 24px; }

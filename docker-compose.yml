@@ -9,7 +9,30 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./server/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U whiteboard -d whiteboard"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  db-init:
+    image: postgres:16-alpine
+    environment:
+      PGPASSWORD: whiteboard
+    volumes:
+      - ./server/schema.sql:/schema.sql:ro
+      - ./server/migrations:/migrations:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    command:
+      - sh
+      - -ec
+      - |
+        psql -h db -U whiteboard -d whiteboard -v ON_ERROR_STOP=1 -f /schema.sql
+        for migration in /migrations/*.sql; do
+          psql -h db -U whiteboard -d whiteboard -v ON_ERROR_STOP=1 -f "$${migration}"
+        done
 
   server:
     build: ./server
@@ -18,7 +41,8 @@ services:
     environment:
       DATABASE_URL: postgres://whiteboard:whiteboard@db:5432/whiteboard
     depends_on:
-      - db
+      db-init:
+        condition: service_completed_successfully
 
   client:
     build: ./client
@@ -27,6 +51,8 @@ services:
     environment:
       VITE_WS_URL: ws://localhost:3001
       VITE_API_URL: http://localhost:3001
+      VITE_API_PROXY_TARGET: http://server:3001
+      VITE_WS_PROXY_TARGET: ws://server:3001
 
 volumes:
   pgdata:

@@ -6,6 +6,22 @@
   padding: 0 max(24px, calc((100vw - 1020px) / 2));
 }
 
+.dashboard-account {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.dashboard-account .button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.logout-error {
+  color: #a54b4b;
+  font-size: 12px;
+}
+
 .dashboard-content {
   width: min(780px, calc(100% - 48px));
   margin: 0 auto;
@@ -32,6 +48,91 @@
   margin: 8px 0 0;
   color: #718092;
   font-size: 14px;
+}
+
+.dashboard-heading .button:disabled,
+.canvas-create-fields .button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.canvas-create-form,
+.dashboard-empty,
+.dashboard-message {
+  border: 1px solid #e1e6eb;
+  border-radius: 9px;
+  background: #fff;
+}
+
+.canvas-create-form {
+  margin: -10px 0 24px;
+  padding: 16px;
+}
+
+.canvas-create-form label {
+  display: block;
+  margin-bottom: 8px;
+  color: #536276;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.canvas-create-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.canvas-create-fields input {
+  min-width: 180px;
+  min-height: 38px;
+  flex: 1;
+  padding: 0 11px;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  color: #202b3a;
+  font: inherit;
+  font-size: 13px;
+}
+
+.canvas-create-fields input:focus-visible {
+  outline: 3px solid rgb(73 104 215 / 24%);
+  border-color: #7187dd;
+}
+
+.canvas-create-error {
+  margin: 10px 0 0;
+  color: #a54b4b;
+  font-size: 12px;
+}
+
+.dashboard-message {
+  padding: 18px;
+  color: #718092;
+  font-size: 13px;
+}
+
+.dashboard-error p {
+  margin: 0 0 12px;
+  color: #a54b4b;
+}
+
+.dashboard-empty {
+  padding: 34px 22px;
+  text-align: center;
+}
+
+.dashboard-empty h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 680;
+  letter-spacing: -0.02em;
+}
+
+.dashboard-empty p {
+  margin: 8px 0 18px;
+  color: #718092;
+  font-size: 13px;
 }
 
 .canvas-list {
@@ -129,5 +230,13 @@
   .canvas-row {
     min-height: 66px;
     padding: 10px 12px;
+  }
+
+  .canvas-create-fields {
+    flex-direction: column;
+  }
+
+  .canvas-create-fields input {
+    width: 100%;
   }
 }

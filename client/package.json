@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "vite --host",
     "build": "tsc -b && vite build",
+    "test": "node --experimental-strip-types --test src/api/*.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -1,11 +1,17 @@
-export default function DashboardHeading() {
+export default function DashboardHeading({
+  onNewCanvas,
+  disabled,
+}: {
+  onNewCanvas(): void;
+  disabled: boolean;
+}) {
   return (
     <div className="dashboard-heading">
       <div>
         <h1>Your canvases</h1>
         <p>Choose a canvas to open, or start a new one.</p>
       </div>
-      <button className="button primary" type="button">
+      <button className="button primary" type="button" onClick={onNewCanvas} disabled={disabled}>
         <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
           <path
             d="M10 4v12M4 10h12"

@@ -1,7 +1,18 @@
-export type CanvasPreviewKind = "checkout" | "account" | "planning";
-
-export type CanvasSummary = {
+export type Canvas = {
   id: string;
-  name: string;
-  preview: CanvasPreviewKind;
+  title: string;
+  createdBy: string;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CanvasMember = {
+  id: string;
+  username: string;
+};
+
+export type CanvasDetail = {
+  canvas: Canvas;
+  members: CanvasMember[];
 };

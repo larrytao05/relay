@@ -239,7 +239,9 @@ class EndpointHandlerTests(unittest.TestCase):
             self.run_async(auth.current_user(session_token=token))
         self.assertEqual(expired.exception.status_code, 401)
 
-        logout_response = self.run_async(auth.logout(Response(), session_token=token))
+        logout_response = Response()
+        self.run_async(auth.logout(logout_response, session_token=token))
+        self.assertEqual(logout_response.status_code, 204)
         self.assertNotIn(token_hash, self.database.sessions)
         self.assertIn('session=""', logout_response.headers["set-cookie"])
 

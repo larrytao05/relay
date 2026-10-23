@@ -14,6 +14,7 @@ docker compose up --build
 
 This starts:
 - **PostgreSQL** on port 5432
+- **Database initialization**, which applies `schema.sql` and SQL migrations before the backend starts
 - **Backend (FastAPI)** on port 3001
 - **Frontend (React)** on port 5173
 
@@ -80,7 +81,8 @@ The frontend dev server proxies `/api` and `/ws` to the backend at `localhost:30
 │   ├── app/
 │   │   ├── db.py       # Postgres connection pool (asyncpg)
 │   │   └── main.py     # FastAPI app, HTTP routes, WebSocket endpoint
-│   └── schema.sql      # Database schema (runs on first Postgres start)
+│   ├── schema.sql      # Base database schema
+│   └── migrations/     # Incremental database changes
 └── docker-compose.yml
 ```
 

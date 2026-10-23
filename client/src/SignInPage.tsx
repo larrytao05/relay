@@ -1,5 +1,6 @@
-import type { FormEvent, ReactNode } from "react";
-import { Link } from "react-router";
+import { useState, type FormEvent, type ReactNode } from "react";
+import { Link, useNavigate } from "react-router";
+import { useAuth, type AuthUser } from "./AuthContext.tsx";
 import Brand from "./components/Brand.tsx";
 import Header from "./components/Header.tsx";
 import "./SignInPage.css";
@@ -7,6 +8,11 @@ import "./SignInPage.css";
 type SignInPageProps = {
   mode?: "sign-in" | "sign-up";
 };
+
+type FormState =
+  | { kind: "idle" }
+  | { kind: "submitting" }
+  | { kind: "error"; message: string };
 
 export default function SignInPage({ mode = "sign-in" }: SignInPageProps) {
   const isSignUp = mode === "sign-up";
@@ -118,22 +124,50 @@ function SignInHeading({ isSignUp }: { isSignUp: boolean }) {
 }
 
 function SignInForm({ isSignUp }: { isSignUp: boolean }) {
-  function keepStatic(event: FormEvent<HTMLFormElement>) {
+  const [state, setState] = useState<FormState>({ kind: "idle" });
+  const { setAuthenticated } = useAuth();
+  const navigate = useNavigate();
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (state.kind === "submitting") return;
+
+    const formData = new FormData(event.currentTarget);
+    const username = formData.get("username");
+    const password = formData.get("password");
+    if (typeof username !== "string" || typeof password !== "string") {
+      setState({ kind: "error", message: "Enter your username and password." });
+      return;
+    }
+
+    setState({ kind: "submitting" });
+    try {
+      const response = await fetch(`/api/auth/${isSignUp ? "signup" : "login"}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ username, password }),
+      });
+      const result: unknown = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        setState({ kind: "error", message: getResponseError(result) });
+        return;
+      }
+      if (!isUserResponse(result)) {
+        setState({ kind: "error", message: "The server returned an unexpected response." });
+        return;
+      }
+
+      setAuthenticated(result.user);
+      navigate("/canvases", { replace: true });
+    } catch {
+      setState({ kind: "error", message: "Couldn't connect. Check your connection and try again." });
+    }
   }
 
   return (
-    <form className="sign-in-form" onSubmit={keepStatic}>
-      {isSignUp && (
-        <CredentialField
-          id="email"
-          label="Email"
-          type="email"
-          placeholder="you@example.com"
-          autoComplete="email"
-          required
-        />
-      )}
+    <form className="sign-in-form" onSubmit={submit} aria-busy={state.kind === "submitting"}>
       <CredentialField
         id="username"
         label="Username"
@@ -154,8 +188,12 @@ function SignInForm({ isSignUp }: { isSignUp: boolean }) {
         maxLength={128}
         required
       />
-      <SubmitButton label={isSignUp ? "Create account" : "Sign in"} />
-      <FormFeedback />
+      <SubmitButton
+        label={isSignUp ? "Create account" : "Sign in"}
+        pendingLabel={isSignUp ? "Creating account…" : "Signing in…"}
+        submitting={state.kind === "submitting"}
+      />
+      <FormFeedback state={state} isSignUp={isSignUp} />
     </form>
   );
 }
@@ -174,7 +212,7 @@ function CredentialField({
 }: {
   id: string;
   label: string;
-  type?: "text" | "email" | "password";
+  type?: "text" | "password";
   placeholder: string;
   autoComplete: string;
   minLength?: number;
@@ -202,12 +240,61 @@ function CredentialField({
   );
 }
 
-function SubmitButton({ label }: { label: string }) {
-  return <button className="sign-in-submit" type="submit">{label}</button>;
+function SubmitButton({
+  label,
+  pendingLabel,
+  submitting,
+}: {
+  label: string;
+  pendingLabel: string;
+  submitting: boolean;
+}) {
+  return (
+    <button className="sign-in-submit" type="submit" disabled={submitting}>
+      {submitting ? pendingLabel : label}
+    </button>
+  );
 }
 
-function FormFeedback() {
-  return <p className="form-feedback" role="status" aria-live="polite" />;
+function FormFeedback({ state, isSignUp }: { state: FormState; isSignUp: boolean }) {
+  const message = state.kind === "error"
+    ? state.message
+    : state.kind === "submitting" && isSignUp
+      ? "Creating your account…"
+      : state.kind === "submitting"
+        ? "Signing you in…"
+        : "";
+  return (
+    <p className="form-feedback" role={state.kind === "error" ? "alert" : "status"} aria-live="polite">
+      {message}
+    </p>
+  );
+}
+
+function isUserResponse(value: unknown): value is { user: AuthUser } {
+  if (typeof value !== "object" || value === null || !("user" in value)) return false;
+  const user = value.user;
+  return typeof user === "object" && user !== null &&
+    "id" in user && typeof user.id === "string" &&
+    "username" in user && typeof user.username === "string";
+}
+
+function getResponseError(value: unknown) {
+  if (typeof value !== "object" || value === null || !("detail" in value)) {
+    return "Check your username and password and try again.";
+  }
+
+  if (typeof value.detail === "string") return value.detail;
+
+  if (Array.isArray(value.detail)) {
+    const message = value.detail.find(
+      (item): item is { msg: string } =>
+        typeof item === "object" && item !== null && "msg" in item && typeof item.msg === "string",
+    )?.msg;
+    if (message) return message.replace(/^Value error,\s*/, "");
+  }
+
+  return "Check your username and password and try again.";
 }
 
 function SignupPrompt({ isSignUp }: { isSignUp: boolean }) {
