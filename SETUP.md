@@ -41,6 +41,31 @@ npm install
 npm run dev
 ```
 
+## Running backend tests
+
+Install the backend's development dependencies, then run the unit tests:
+
+```bash
+cd server
+pip install -e '.[dev]'
+python -m unittest discover -s tests -v
+```
+
+The HTTP integration test is skipped unless `TEST_DATABASE_URL` points to a
+PostgreSQL test database with `schema.sql` applied. Create a separate database
+so the test runs away from your development data:
+
+```bash
+createdb whiteboard_test
+psql postgres://whiteboard:whiteboard@localhost:5432/whiteboard_test -f schema.sql
+TEST_DATABASE_URL=postgres://whiteboard:whiteboard@localhost:5432/whiteboard_test \
+  python -m unittest discover -s tests -v
+dropdb whiteboard_test
+```
+
+The integration test creates uniquely named test users and removes those users
+and their canvases when it finishes.
+
 The frontend dev server proxies `/api` and `/ws` to the backend at `localhost:3001`.
 
 ## Project structure

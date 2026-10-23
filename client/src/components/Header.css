@@ -1,0 +1,8 @@
+.page-header {
+  display: flex;
+  height: 64px;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #e2e7ec;
+  background: #fff;
+}
