@@ -1,3 +1,5 @@
+import { Link } from "react-router";
+
 const colors = [
   { name: "Blue", value: "#dce6ff", className: "blue" },
   { name: "Green", value: "#d9eee4", className: "green" },
@@ -163,10 +165,10 @@ export default function EditorPage() {
       <main className="editor-page">
         <header className="editor-topbar">
           <div className="editor-top-left">
-            <a className="editor-brand" href="#canvases" aria-label="Relay home">
+            <Link className="editor-brand" to="/canvases" aria-label="Relay home">
               <BrandMark />
               <span>relay</span>
-            </a>
+            </Link>
             <span className="editor-breadcrumb">My canvases /</span>
             <div className="editor-document">
               <span className="editor-document-title">Checkout flow</span>

@@ -1,9 +1,10 @@
 import type { CanvasSummary } from "../types.ts";
+import { Link } from "react-router";
 import CanvasThumbnail from "./CanvasThumbnail.tsx";
 
 export default function CanvasListItem({ canvas }: { canvas: CanvasSummary }) {
   return (
-    <div className="canvas-row">
+    <Link className="canvas-row" to={`/canvases/${canvas.id}`}>
       <span className="canvas-thumbnail">
         <CanvasThumbnail kind={canvas.preview} />
       </span>
@@ -17,6 +18,6 @@ export default function CanvasListItem({ canvas }: { canvas: CanvasSummary }) {
           strokeLinejoin="round"
         />
       </svg>
-    </div>
+    </Link>
   );
 }
