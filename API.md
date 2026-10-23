@@ -1,6 +1,6 @@
 # Whiteboard API contract
 
-This is the API contract. `GET /health`, authentication, canvas management, authenticated WebSocket snapshots, and `shape.create` are implemented. Shape updates/deletes, undo/redo, and presence/cursor broadcasts remain planned.
+This is the API contract. `GET /health`, authentication, canvas management, authenticated WebSocket snapshots, and shape creation, updates, and soft deletes are implemented. Undo/redo and presence/cursor broadcasts remain planned.
 Use HTTP for accounts and canvas membership, and one WebSocket per open canvas for edits and presence.
 
 ## HTTP endpoints
@@ -44,7 +44,7 @@ The snapshot's `connections` list includes each active connection, including thi
 Subscribe and load the snapshot under the same canvas queue used for edits so that an update cannot disappear between those steps.
 Reconnect by obtaining a fresh snapshot.
 
-Invalid frames return `invalid_message`. `shape.create` persists and broadcasts accepted operations; exact retries return the saved acknowledgement only to the requester. Other valid commands currently return `feature_not_available` until their tickets are implemented. Origin configuration and the single-worker deployment requirement are documented in [WEBSOCKET_CONNECTIONS.md](server/WEBSOCKET_CONNECTIONS.md).
+Invalid frames return `invalid_message`. `shape.create`, `shape.update`, and `shape.delete` persist and broadcast accepted operations; exact retries return the saved acknowledgement only to the requester. Undo, redo, and cursor commands currently return `feature_not_available` until their tickets are implemented. Origin configuration and the single-worker deployment requirement are documented in [WEBSOCKET_CONNECTIONS.md](server/WEBSOCKET_CONNECTIONS.md).
 
 | Client message | Fields besides `type` | Effect |
 | --- | --- | --- |
@@ -72,7 +72,7 @@ Reject reuse of an ID for a different command or actor. Derive actor and canvas 
 | `error` | The request's `operation_id` when present, `code`, and `message`; include the authoritative shape for a conflict. |
 
 Durable commands run in a canvas-scoped queue. One database transaction updates the shape, inserts `canvas_operation`, and increments the canvas revision.
-Capture inverse patches on the server. Broadcast only after commit, in revision order. Clients replace local canonical shapes with the acknowledged results.
+Capture inverse patches on the server. Broadcast only after commit, in revision order. Clients apply acknowledged results only when their revisions are newer than local canonical state. An exact retry can return an older original acknowledgement; use it to settle the pending request without replacing a newer shape or lowering the canvas revision.
 An operation error leaves durable state and the canvas revision unchanged.
 
 Undo and redo are per user, never a whole-canvas snapshot restore. They must check later edits before applying an inverse and refuse a conflicting undo rather than erase another user's work.

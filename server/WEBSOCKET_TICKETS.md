@@ -2,7 +2,7 @@
 
 These tickets implement the backend design in [WEBSOCKET_DESIGN.md](WEBSOCKET_DESIGN.md) and the messages in [API.md](../API.md). Accounts and canvas management already exist. Frontend drawing interactions and socket wiring are separate work.
 
-WS-01 through WS-04 are implemented. Tests cover protocol validation, replay storage, database upgrades, authenticated snapshots, connection cleanup, and durable shape creation. Independent reviews are recorded in [reviews/ws01-ws02/summary.md](reviews/ws01-ws02/summary.md), [reviews/ws03/summary.md](reviews/ws03/summary.md), and [reviews/ws04/summary.md](reviews/ws04/summary.md). WS-05 through WS-08 remain unimplemented.
+WS-01 through WS-05 are implemented. Tests cover protocol validation, replay storage, database upgrades, authenticated snapshots, connection cleanup, durable shape creation, updates, soft deletes, and conflicts. Independent reviews are recorded in [reviews/ws01-ws02/summary.md](reviews/ws01-ws02/summary.md), [reviews/ws03/summary.md](reviews/ws03/summary.md), and [reviews/ws04/summary.md](reviews/ws04/summary.md). WS-06 through WS-08 remain unimplemented. WS-05 review is deferred until all remaining tickets are implemented.
 
 ## Build order
 
@@ -192,3 +192,10 @@ Run one final flow through existing test helpers: two accounts join, create/upda
 ## Completion checklist
 
 For each ticket, record the new tests, their expected initial failure, the final passing run, and any unfinished acceptance criterion. Keep frontend files outside these backend tickets. Use one Uvicorn worker. Run the final shared flow with two real WebSockets and PostgreSQL before declaring the collaboration backend complete.
+
+## Implementation evidence
+
+| Ticket | Failing before implementation | Passing after implementation | Review |
+| --- | --- | --- | --- |
+| WS-04 | Create commands returned `feature_not_available` in the new socket tests. | 7 create tests; 32 backend tests with PostgreSQL enabled. | Approved by an independent Luna reviewer. |
+| WS-05 | Update/delete commands returned `feature_not_available`; concurrent edits produced zero accepted operations. | 5 edit tests; 37 backend tests with PostgreSQL enabled; Ruff and formatting passed. | Deferred until all tickets are implemented. |

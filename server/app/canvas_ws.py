@@ -547,9 +547,13 @@ class CanvasRooms:
                 message = error.to_message()
                 applied = False
             else:
-                if isinstance(command, _CreateCommand):
+                if isinstance(
+                    command, (_CreateCommand, _UpdateCommand, _DeleteCommand)
+                ):
                     async with room.lock:
-                        message, applied = await self._create_shape(connection, command)
+                        message, applied = await self._apply_shape_command(
+                            connection, command
+                        )
                         if applied:
                             slow = [
                                 peer
@@ -579,8 +583,10 @@ class CanvasRooms:
                 await self._close_slow_connection(connection)
                 return
 
-    async def _create_shape(
-        self, connection: Connection, command: _CreateCommand
+    async def _apply_shape_command(
+        self,
+        connection: Connection,
+        command: _CreateCommand | _UpdateCommand | _DeleteCommand,
     ) -> tuple[dict[str, object], bool]:
         request = command.model_dump(mode="json")
         pool = await self._db_pool()
@@ -610,28 +616,22 @@ class CanvasRooms:
                             "Canvas access is no longer available.",
                         ), False
 
-                    previous = await conn.fetchrow(
-                        """SELECT canvas_id, actor_id, request, result
-                           FROM canvas_operation WHERE id = $1""",
-                        command.operation_id,
+                    replay = await self._operation_replay(
+                        conn, connection, command.operation_id, request
                     )
-                    if previous is not None:
-                        saved_request = _json_value(previous["request"])
-                        saved_result = _json_value(previous["result"])
-                        if (
-                            previous["canvas_id"] == connection.canvas_id
-                            and previous["actor_id"] == connection.identity.user.id
-                            and saved_request == request
-                            and isinstance(saved_result, dict)
-                        ):
-                            return saved_result, False
-                        return _operation_error(
-                            command.operation_id,
-                            "operation_id_reused",
-                            "Operation ID was already used for another request.",
-                        ), False
+                    if replay is not None:
+                        return replay, False
 
-                    try:
+                    before_patch: dict[str, object]
+                    after_patch: dict[str, object]
+                    operation_kind: str
+                    if isinstance(command, _CreateCommand):
+                        operation_kind = "create"
+                        before_patch = {}
+                        after_patch = {
+                            "kind": command.kind,
+                            "properties": command.properties,
+                        }
                         await conn.execute(
                             """INSERT INTO shape (id, canvas_id, kind, properties)
                                VALUES ($1, $2, $3, $4::jsonb)""",
@@ -640,23 +640,99 @@ class CanvasRooms:
                             command.kind,
                             json.dumps(command.properties),
                         )
-                    except asyncpg.UniqueViolationError:
-                        # Shape IDs are global as well; a retry cannot replace a row.
-                        raise _ShapeIdConflict from None
+                        shape = {
+                            "id": str(command.shape_id),
+                            "kind": command.kind,
+                            "properties": command.properties,
+                            "revision": 1,
+                            "deleted": False,
+                        }
+                    else:
+                        row = await conn.fetchrow(
+                            """SELECT id, kind, properties, revision,
+                                      (deleted_at IS NOT NULL) AS deleted
+                               FROM shape WHERE id = $1 AND canvas_id = $2
+                               FOR UPDATE""",
+                            command.shape_id,
+                            connection.canvas_id,
+                        )
+                        if row is None:
+                            return _operation_error(
+                                command.operation_id,
+                                "shape_unavailable",
+                                "Shape is not available in this canvas.",
+                            ), False
+                        properties = _json_value(row["properties"])
+                        current_shape = {
+                            "id": str(row["id"]),
+                            "kind": row["kind"],
+                            "properties": properties,
+                            "revision": row["revision"],
+                            "deleted": row["deleted"],
+                        }
+                        if row["revision"] != command.expected_revision:
+                            return {
+                                **_operation_error(
+                                    command.operation_id,
+                                    "conflict",
+                                    "Shape revision is stale.",
+                                ),
+                                "shape": current_shape,
+                            }, False
+                        if row["deleted"]:
+                            return _operation_error(
+                                command.operation_id,
+                                "shape_deleted",
+                                "Shape has already been deleted.",
+                            ), False
+                        operation_kind = (
+                            "update"
+                            if isinstance(command, _UpdateCommand)
+                            else "delete"
+                        )
+                        if isinstance(command, _UpdateCommand):
+                            try:
+                                merged = _merge_shape_patch(
+                                    row["kind"], properties, command.patch
+                                )
+                            except (TypeError, ValueError) as exc:
+                                return _operation_error(
+                                    command.operation_id, "invalid_patch", str(exc)
+                                ), False
+                            before_patch = {
+                                key: properties[key] for key in command.patch
+                            }
+                            after_patch = dict(command.patch)
+                            await conn.execute(
+                                """UPDATE shape SET properties = $2::jsonb,
+                                          revision = revision + 1, updated_at = now()
+                                   WHERE id = $1""",
+                                command.shape_id,
+                                json.dumps(merged),
+                            )
+                            properties = merged
+                        else:
+                            before_patch = {"deleted": False}
+                            after_patch = {"deleted": True}
+                            await conn.execute(
+                                """UPDATE shape SET deleted_at = now(),
+                                          revision = revision + 1, updated_at = now()
+                                   WHERE id = $1""",
+                                command.shape_id,
+                            )
+                        shape = {
+                            **current_shape,
+                            "properties": properties,
+                            "revision": row["revision"] + 1,
+                            "deleted": operation_kind == "delete",
+                        }
 
                     revision = access["revision"] + 1
-                    shape = {
-                        "id": str(command.shape_id),
-                        "kind": command.kind,
-                        "properties": command.properties,
-                        "revision": 1,
-                        "deleted": False,
-                    }
                     result: dict[str, object] = {
                         "type": "operation.applied",
                         "operation_id": str(command.operation_id),
                         "actor_id": str(connection.identity.user.id),
-                        "kind": "create",
+                        "kind": operation_kind,
                         "target_operation_id": None,
                         "canvas_revision": revision,
                         "shape": shape,
@@ -671,64 +747,110 @@ class CanvasRooms:
                         """INSERT INTO canvas_operation
                            (id, canvas_id, shape_id, actor_id, canvas_revision, kind,
                             before_patch, after_patch, request, result)
-                           VALUES ($1, $2, $3, $4, $5, 'create', '{}'::jsonb,
-                                   $6::jsonb, $7::jsonb, $8::jsonb)""",
+                           VALUES ($1, $2, $3, $4, $5, $6,
+                                   $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb)""",
                         command.operation_id,
                         connection.canvas_id,
                         command.shape_id,
                         connection.identity.user.id,
                         revision,
-                        json.dumps(
-                            {"kind": command.kind, "properties": command.properties}
-                        ),
+                        operation_kind,
+                        json.dumps(before_patch),
+                        json.dumps(after_patch),
                         json.dumps(request),
                         json.dumps(result),
                     )
                     return result, True
-        except _ShapeIdConflict:
-            return _operation_error(
-                command.operation_id,
-                "shape_unavailable",
-                "Shape ID is already in use.",
-            ), False
         except asyncpg.UniqueViolationError:
             # A different canvas lock cannot serialize a globally unique operation ID.
-            try:
-                async with pool.acquire() as conn:
-                    winner = await conn.fetchrow(
-                        "SELECT canvas_id, actor_id, request, result FROM canvas_operation WHERE id = $1",
-                        command.operation_id,
-                    )
-            except asyncpg.PostgresError:
-                logger.exception("Could not inspect operation ID collision")
+            collision = await self._operation_collision(
+                pool, connection, command.operation_id, request
+            )
+            if collision is not None:
+                return collision, False
+            if isinstance(command, _CreateCommand):
                 return _operation_error(
                     command.operation_id,
-                    "operation_failed",
-                    "Operation could not be saved.",
+                    "shape_unavailable",
+                    "Shape ID is already in use.",
                 ), False
-            if winner is not None:
-                if (
-                    winner["canvas_id"] == connection.canvas_id
-                    and winner["actor_id"] == connection.identity.user.id
-                    and _json_value(winner["request"]) == request
-                    and isinstance(_json_value(winner["result"]), dict)
-                ):
-                    return _json_value(winner["result"]), False
-                return _operation_error(
-                    command.operation_id,
-                    "operation_id_reused",
-                    "Operation ID was already used for another request.",
-                ), False
-            return _operation_error(
-                command.operation_id, "shape_unavailable", "Shape ID is already in use."
-            ), False
-        except asyncpg.PostgresError:
-            logger.exception("Canvas create transaction failed")
             return _operation_error(
                 command.operation_id,
                 "operation_failed",
                 "Operation could not be saved.",
             ), False
+        except asyncpg.PostgresError:
+            logger.exception("Canvas shape command transaction failed")
+            return _operation_error(
+                command.operation_id,
+                "operation_failed",
+                "Operation could not be saved.",
+            ), False
+
+    async def _operation_replay(
+        self,
+        conn: object,
+        connection: Connection,
+        operation_id: UUID,
+        request: dict[str, object],
+    ) -> dict[str, object] | None:
+        previous = await conn.fetchrow(
+            """SELECT canvas_id, actor_id, request, result
+               FROM canvas_operation WHERE id = $1""",
+            operation_id,
+        )
+        if previous is None:
+            return None
+        saved_result = _json_value(previous["result"])
+        if (
+            previous["canvas_id"] == connection.canvas_id
+            and previous["actor_id"] == connection.identity.user.id
+            and _json_value(previous["request"]) == request
+            and isinstance(saved_result, dict)
+        ):
+            return saved_result
+        return _operation_error(
+            operation_id,
+            "operation_id_reused",
+            "Operation ID was already used for another request.",
+        )
+
+    async def _operation_collision(
+        self,
+        pool: object,
+        connection: Connection,
+        operation_id: UUID,
+        request: dict[str, object],
+    ) -> dict[str, object] | None:
+        try:
+            async with pool.acquire() as conn:
+                winner = await conn.fetchrow(
+                    """SELECT canvas_id, actor_id, request, result
+                       FROM canvas_operation WHERE id = $1""",
+                    operation_id,
+                )
+        except asyncpg.PostgresError:
+            logger.exception("Could not inspect operation ID collision")
+            return _operation_error(
+                operation_id,
+                "operation_failed",
+                "Operation could not be saved.",
+            )
+        if winner is None:
+            return None
+        saved_result = _json_value(winner["result"])
+        if (
+            winner["canvas_id"] == connection.canvas_id
+            and winner["actor_id"] == connection.identity.user.id
+            and _json_value(winner["request"]) == request
+            and isinstance(saved_result, dict)
+        ):
+            return saved_result
+        return _operation_error(
+            operation_id,
+            "operation_id_reused",
+            "Operation ID was already used for another request.",
+        )
 
     def _enqueue_locked(
         self, room: Room, connection: Connection, message: dict[str, object]
