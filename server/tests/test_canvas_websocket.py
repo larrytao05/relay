@@ -284,6 +284,217 @@ class _BoardContext:
 
 
 class CanvasRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_shutdown_finishes_cancelled_multi_peer_overflow_cleanup(self):
+        from app.auth import PublicUser
+        from app.canvas_ws import CanvasRooms, Connection, Room, SessionIdentity
+
+        rooms = CanvasRooms()
+        canvas_id = uuid4()
+        room = Room()
+        rooms._rooms[canvas_id] = room
+        identity = SessionIdentity(
+            "digest",
+            PublicUser(id=uuid4(), username="tester"),
+            datetime.now(UTC) + timedelta(hours=1),
+        )
+        sockets = [_ControlledSocket(), _ControlledSocket()]
+        connections = [
+            Connection(uuid4(), canvas_id, identity, socket, asyncio.Queue())
+            for socket in sockets
+        ]
+        close_started = asyncio.Event()
+        original_close = sockets[0].close
+
+        async def interrupted_close(code=1000):
+            if not close_started.is_set():
+                close_started.set()
+                await asyncio.Event().wait()
+            await original_close(code)
+
+        sockets[0].close = interrupted_close
+        for connection in connections:
+            connection.detached = True
+            connection.sender_task = asyncio.create_task(asyncio.Event().wait())
+            connection.expiry_task = asyncio.create_task(asyncio.Event().wait())
+            room.broadcast_overflows[connection.id] = connection
+
+        owner = asyncio.create_task(rooms._close_broadcast_overflows(room))
+        rooms._serving.add(owner)
+        try:
+            await asyncio.wait_for(close_started.wait(), timeout=1)
+            await asyncio.wait_for(rooms.close(), timeout=1)
+            self.assertTrue(owner.cancelled())
+            self.assertEqual([socket.closed for socket in sockets], [True, True])
+            for connection in connections:
+                self.assertTrue(connection.sender_task.done())
+                self.assertTrue(connection.expiry_task.done())
+            self.assertFalse(room.broadcast_overflows)
+            self.assertNotIn(canvas_id, rooms._rooms)
+        finally:
+            owner.cancel()
+            tasks = [owner]
+            for connection in connections:
+                tasks.extend([connection.sender_task, connection.expiry_task])
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def test_presence_join_broadcast_overflow_closes_slow_peer(self):
+        from app.auth import PublicUser
+        from app.canvas_ws import CanvasRooms, Connection, Room, SessionIdentity
+
+        @asynccontextmanager
+        async def acquire():
+            yield None
+
+        class SnapshotPool:
+            pass
+
+        pool = SnapshotPool()
+        pool.acquire = acquire
+        rooms = CanvasRooms(pool=pool, queue_capacity=1)
+        canvas_id = uuid4()
+        room = Room()
+        rooms._rooms[canvas_id] = room
+        identity = SessionIdentity(
+            "digest",
+            PublicUser(id=uuid4(), username="tester"),
+            datetime.now(UTC) + timedelta(hours=1),
+        )
+        slow_socket = _ControlledSocket(block=True)
+        slow = Connection(
+            uuid4(), canvas_id, identity, slow_socket, asyncio.Queue(maxsize=1)
+        )
+        room.connections[slow.id] = slow
+        slow.sender_task = asyncio.create_task(rooms._send_loop(slow))
+        slow.expiry_task = asyncio.create_task(asyncio.Event().wait())
+        slow.outbound.put_nowait({"type": "blocked"})
+        await asyncio.wait_for(slow_socket.started.wait(), timeout=1)
+        slow.outbound.put_nowait({"type": "queued"})
+
+        joining_socket = _DisconnectingSocket()
+        with (
+            patch.object(rooms, "_authenticate", AsyncMock(return_value=identity)),
+            patch.object(rooms, "_snapshot", AsyncMock(return_value={"shapes": []})),
+            patch.object(
+                rooms, "_connection_access_valid", AsyncMock(return_value=True)
+            ),
+        ):
+            serving = asyncio.create_task(rooms.serve(joining_socket, canvas_id))
+            try:
+                await asyncio.wait_for(slow_socket.close_started.wait(), timeout=1)
+                self.assertTrue(slow_socket.close_started.is_set())
+                self.assertTrue(slow_socket.closed)
+                self.assertTrue(slow.detached)
+                self.assertTrue(slow.sender_task.done())
+                self.assertTrue(slow.expiry_task.done())
+                self.assertNotIn(slow.id, room.connections)
+                self.assertEqual(room.leases, 1)
+                joining_socket.disconnect.set()
+                await asyncio.wait_for(serving, timeout=1)
+                self.assertNotIn(canvas_id, rooms._rooms)
+            finally:
+                serving.cancel()
+                await asyncio.gather(serving, return_exceptions=True)
+                await rooms.close()
+
+    async def test_cursor_broadcast_overflow_closes_and_stops_slow_peer(self):
+        from app.auth import PublicUser
+        from app.canvas_ws import CanvasRooms, Connection, Room, SessionIdentity
+
+        rooms = CanvasRooms(queue_capacity=1)
+        canvas_id = uuid4()
+        room = Room()
+        rooms._rooms[canvas_id] = room
+        identity = SessionIdentity(
+            "digest",
+            PublicUser(id=uuid4(), username="tester"),
+            datetime.now(UTC) + timedelta(hours=1),
+        )
+        slow_socket = _ControlledSocket(block=True)
+        slow = Connection(
+            uuid4(), canvas_id, identity, slow_socket, asyncio.Queue(maxsize=1)
+        )
+        slow.outbound.put_nowait({"type": "blocked"})
+        room.connections[slow.id] = slow
+        slow.sender_task = asyncio.create_task(rooms._send_loop(slow))
+        slow.expiry_task = asyncio.create_task(asyncio.Event().wait())
+        await asyncio.wait_for(slow_socket.started.wait(), timeout=1)
+        slow.outbound.put_nowait({"type": "queued"})
+
+        cascade_socket = _ControlledSocket(block=True)
+        cascade = Connection(
+            uuid4(), canvas_id, identity, cascade_socket, asyncio.Queue(maxsize=1)
+        )
+        cascade.outbound.put_nowait({"type": "blocked"})
+        room.connections[cascade.id] = cascade
+        cascade.sender_task = asyncio.create_task(rooms._send_loop(cascade))
+        cascade.expiry_task = asyncio.create_task(asyncio.Event().wait())
+        await asyncio.wait_for(cascade_socket.started.wait(), timeout=1)
+        cascade.outbound.put_nowait({"type": "queued"})
+
+        healthy_socket = _CursorDisconnectingSocket()
+        healthy = Connection(
+            uuid4(), canvas_id, identity, healthy_socket, asyncio.Queue(maxsize=4)
+        )
+        room.connections[healthy.id] = healthy
+        healthy.sender_task = asyncio.create_task(rooms._send_loop(healthy))
+        try:
+            with (
+                patch.object(
+                    rooms, "_connection_access_valid", AsyncMock(return_value=True)
+                ),
+                self.assertRaises(WebSocketDisconnect),
+            ):
+                await asyncio.wait_for(rooms._receive_loop(healthy, room), timeout=1)
+            self.assertTrue(slow_socket.close_started.is_set())
+            self.assertTrue(slow_socket.closed)
+            self.assertTrue(slow.detached)
+            self.assertNotIn(slow.id, room.connections)
+            self.assertTrue(cascade_socket.close_started.is_set())
+            self.assertTrue(cascade_socket.closed)
+            self.assertTrue(cascade.detached)
+            self.assertNotIn(cascade.id, room.connections)
+            self.assertTrue(slow.sender_task.done())
+            self.assertTrue(slow.expiry_task.done())
+            self.assertTrue(cascade.sender_task.done())
+            self.assertTrue(cascade.expiry_task.done())
+            for peer in (cascade, slow):
+                self.assertEqual(
+                    await asyncio.wait_for(healthy_socket.received.get(), timeout=1),
+                    {"type": "presence.left", "connection_id": str(peer.id)},
+                )
+            self.assertTrue(healthy_socket.received.empty())
+            self.assertIn(healthy.id, room.connections)
+            self.assertFalse(healthy.detached)
+            async with room.lock:
+                self.assertTrue(
+                    rooms._enqueue_locked(room, healthy, {"type": "health_check"})
+                )
+            self.assertEqual(
+                await asyncio.wait_for(healthy_socket.received.get(), timeout=1),
+                {"type": "health_check"},
+            )
+            async with room.lock:
+                self.assertFalse(rooms._detach_locked(room, slow))
+        finally:
+            for task in (
+                slow.sender_task,
+                slow.expiry_task,
+                cascade.sender_task,
+                cascade.expiry_task,
+                healthy.sender_task,
+            ):
+                task.cancel()
+            await asyncio.gather(
+                slow.sender_task,
+                slow.expiry_task,
+                cascade.sender_task,
+                cascade.expiry_task,
+                healthy.sender_task,
+                return_exceptions=True,
+            )
+
     async def test_shutdown_does_not_interrupt_disconnect_cleanup(self):
         from app.auth import PublicUser
         from app.canvas_ws import CanvasRooms, SessionIdentity
@@ -541,3 +752,21 @@ class _DisconnectingSocket(_ControlledSocket):
     async def receive_text(self):
         await self.disconnect.wait()
         raise WebSocketDisconnect()
+
+
+class _CursorDisconnectingSocket:
+    def __init__(self):
+        self.received = asyncio.Queue()
+        self.sent_frame = False
+
+    async def receive_text(self):
+        if self.sent_frame:
+            raise WebSocketDisconnect()
+        self.sent_frame = True
+        return '{"type":"cursor","position":{"x":1,"y":2}}'
+
+    async def send_json(self, message):
+        await self.received.put(message)
+
+    async def close(self, code=1000):
+        pass

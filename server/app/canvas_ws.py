@@ -89,6 +89,7 @@ class Room:
     connections: dict[UUID, Connection] = field(default_factory=dict)
     leases: int = 0
     operation_origins: dict[UUID, UUID] = field(default_factory=dict)
+    broadcast_overflows: dict[UUID, Connection] = field(default_factory=dict)
 
 
 class CanvasRooms:
@@ -152,6 +153,7 @@ class CanvasRooms:
             async with room.lock:
                 if not connection.detached:
                     self._detach_locked(room, connection)
+            await self._close_broadcast_overflows(room)
             await self._stop_delivery(connection)
             await self._close_socket(connection.socket, 1008)
             return
@@ -183,6 +185,7 @@ class CanvasRooms:
                     if connection.identity.token_hash == token_hash:
                         self._detach_locked(room, connection)
                         revoked[connection.id] = connection
+            await self._close_broadcast_overflows(room)
         async with self._rooms_lock:
             tracked = tuple(self._connections.values())
         revoked.update(
@@ -241,6 +244,7 @@ class CanvasRooms:
             if (
                 room.leases == 0
                 and not room.connections
+                and not room.broadcast_overflows
                 and self._rooms.get(canvas_id) is room
             ):
                 del self._rooms[canvas_id]
@@ -381,6 +385,7 @@ class CanvasRooms:
                     name=f"canvas-expiry-{connection.id}",
                 )
 
+            await self._close_broadcast_overflows(room)
             await self._receive_loop(connection, room)
         except WebSocketDisconnect:
             pass
@@ -416,6 +421,7 @@ class CanvasRooms:
         if registered:
             async with room.lock:
                 self._detach_locked(room, connection)
+            await self._close_broadcast_overflows(room)
         async with self._rooms_lock:
             self._connections.pop(connection.id, None)
         expiry = connection.expiry_task
@@ -442,6 +448,7 @@ class CanvasRooms:
             if room is not None:
                 async with room.lock:
                     self._detach_locked(room, connection)
+                await self._close_broadcast_overflows(room)
             await self._close_socket(connection.socket, 1011)
 
     async def _receive_loop(self, connection: Connection, room: Room) -> None:
@@ -484,6 +491,7 @@ class CanvasRooms:
                                 },
                                 exclude=connection.id,
                             )
+                    await self._close_broadcast_overflows(room)
                     if revoked:
                         await self._stop_delivery(connection)
                         await self._close_socket(connection.socket, close_code)
@@ -520,6 +528,7 @@ class CanvasRooms:
                                 if not self._enqueue_locked(room, connection, message)
                                 else []
                             )
+                    await self._close_broadcast_overflows(room)
                     if revoked:
                         await self._stop_delivery(connection)
                         await self._close_socket(connection.socket, 1008)
@@ -563,6 +572,7 @@ class CanvasRooms:
                                 if not self._enqueue_locked(room, connection, message)
                                 else []
                             )
+                    await self._close_broadcast_overflows(room)
                     if revoked:
                         await self._stop_delivery(connection)
                         await self._close_socket(connection.socket, 1008)
@@ -588,6 +598,7 @@ class CanvasRooms:
                         close_slow = True
                     else:
                         close_slow = False
+            await self._close_broadcast_overflows(room)
             if revoked:
                 await self._stop_delivery(connection)
                 await self._close_socket(connection.socket, 1008)
@@ -906,8 +917,10 @@ class CanvasRooms:
         exclude: UUID | None = None,
     ) -> None:
         for recipient in tuple(room.connections.values()):
-            if recipient.id != exclude:
-                self._enqueue_locked(room, recipient, message)
+            if recipient.id != exclude and not self._enqueue_locked(
+                room, recipient, message
+            ):
+                room.broadcast_overflows[recipient.id] = recipient
 
     def _detach_locked(self, room: Room, connection: Connection) -> bool:
         if connection.detached:
@@ -922,10 +935,19 @@ class CanvasRooms:
         return True
 
     async def _close_slow_connection(self, connection: Connection) -> None:
-        if connection.sender_task is not None:
-            connection.sender_task.cancel()
-            await asyncio.gather(connection.sender_task, return_exceptions=True)
+        await self._stop_delivery(connection)
         await self._close_socket(connection.socket, 1013)
+
+    async def _close_broadcast_overflows(self, room: Room) -> None:
+        while True:
+            async with room.lock:
+                overflowed = tuple(room.broadcast_overflows.values())
+            if not overflowed:
+                return
+            for connection in overflowed:
+                await self._close_slow_connection(connection)
+                async with room.lock:
+                    room.broadcast_overflows.pop(connection.id, None)
 
     @staticmethod
     async def _close_socket(socket: WebSocket, code: int) -> None:
@@ -955,14 +977,19 @@ class CanvasRooms:
                 for connection in list(room.connections.values()):
                     self._detach_locked(room, connection)
                     connections.append(connection)
-        for connection in connections:
-            if connection.sender_task is not None:
-                connection.sender_task.cancel()
+                known = {connection.id for connection in connections}
+                connections.extend(
+                    connection
+                    for connection_id, connection in room.broadcast_overflows.items()
+                    if connection_id not in known
+                )
         await asyncio.gather(
-            *(c.sender_task for c in connections if c.sender_task is not None),
-            return_exceptions=True,
+            *(self._stop_delivery(connection) for connection in connections)
         )
         await asyncio.gather(*(self._close_socket(c.socket, 1001) for c in connections))
+        for _, room in rooms:
+            async with room.lock:
+                room.broadcast_overflows.clear()
         async with self._rooms_lock:
             for canvas_id, room in rooms:
                 if not room.leases and not room.connections:
