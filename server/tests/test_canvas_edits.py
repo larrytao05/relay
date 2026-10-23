@@ -19,6 +19,35 @@ class CanvasEditPostgresTests(unittest.TestCase):
     def setUp(self):
         self.fixtures = create_helpers.CanvasCreatePostgresTests()
 
+    def test_stale_disjoint_update_merges_broadcasts_and_replays_exactly(self):
+        with self.fixtures._board() as board, TestClient(app) as client:
+            shape_id = self._create_shape(client, board)
+            with self.fixtures._socket(client, board, "token_a") as alice:
+                create_helpers._receive_json(alice)
+                with self.fixtures._socket(client, board, "token_b") as bob:
+                    create_helpers._receive_json(bob)
+                    alice.send_json(_update(uuid4(), shape_id, 1, {"color": "#abcdef"}))
+                    color_ack = create_helpers._receive_json(alice)
+                    self.assertEqual(color_ack, create_helpers._receive_json(bob))
+                    request = _update(uuid4(), shape_id, 1, {"x": 77})
+                    bob.send_json(request)
+                    merged = create_helpers._receive_json(bob)
+                    self.assertEqual(merged["type"], "operation.applied")
+                    self.assertEqual(merged, create_helpers._receive_json(alice))
+                    self.assertEqual(merged["shape"]["revision"], 3)
+                    self.assertEqual(merged["shape"]["properties"]["color"], "#abcdef")
+                    self.assertEqual(merged["shape"]["properties"]["x"], 77)
+                    bob.send_json(request)
+                    self.assertEqual(create_helpers._receive_json(bob), merged)
+                    alice.send_json(_update(uuid4(), shape_id, 1, {"color": "#ffffff"}))
+                    conflict = create_helpers._receive_json(alice)
+                    self.assertEqual(conflict["code"], "conflict")
+                    self.assertEqual(conflict["shape"], merged["shape"])
+                    self.assertEqual(
+                        create_helpers.awaitable_result(self.fixtures._state(board)),
+                        (3, 1, 3),
+                    )
+
     def test_partial_update_merges_and_broadcasts_then_replay_is_immutable(self):
         with self.fixtures._board() as board, TestClient(app) as client:
             shape_id = self._create_shape(client, board)

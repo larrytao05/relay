@@ -60,8 +60,8 @@ Invalid frames return `invalid_message`. `shape.create`, `shape.update`, and `sh
 | `cursor` | `position: {x, y}` or `position: null` | Broadcast this connection's cursor or hide it. Do not write a database row. |
 
 `expected_revision` is the shape's revision, not the canvas revision.
-An update or delete with a stale revision returns a conflict and the current shape. It does not replace collaborators' newer state.
-The client reconciles that state before another attempt. Property-level conflict merging can be added behind the same update message later.
+A stale update merges into the latest shape only when none of its properties were touched by intervening operations. Position and size (`x`, `y`, `width`, `height`, and line endpoints) form one conflict group. Color, opacity, layer order, text, and font size are checked individually. The server verifies contiguous recorded shape revisions, including undo and redo; missing history or a deletion/restoration prevents a merge.
+A stale delete, overlapping update, or future revision returns a conflict with the current shape. Accepted patches retain unrelated properties and record their actual before/after values for undo. Text is one property; concurrent keystrokes are not merged. The frontend preserves active interactions and rebases previews when a remote edit changes unrelated properties; overlapping edits cancel the interaction and preserve changed text drafts for recovery.
 
 Operation IDs identify retries. An identical retry from the same actor receives its original acknowledgement without reapplying the edit.
 Reject reuse of an ID for a different command or actor. Derive actor and canvas IDs from the authenticated connection.

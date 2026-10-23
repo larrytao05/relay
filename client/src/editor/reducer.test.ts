@@ -273,6 +273,42 @@ test("a remote text edit preserves a changed draft before closing the stale edit
   assert.equal(state.shapes[shapeId], collaboratorShape);
 });
 
+test("a remote color change preserves a move and refreshes its preview baseline", () => {
+  const moving: EditorState = { ...readyState(), interaction: { kind: "moving", shapeId, expectedRevision: 1, baseline: shape, start: { x: 1, y: 1 }, current: { x: 8, y: 6 } } };
+  const remoteShape = { ...shape, revision: 2, properties: { ...shape.properties, color: "#abcdef" } };
+  const state = editorReducer(moving, { type: "event", event: applied("remote-color", 2, remoteShape) });
+  assert.equal(state.interaction.kind, "moving");
+  if (state.interaction.kind !== "moving") throw new Error("Move was cancelled");
+  assert.equal(state.interaction.baseline.properties.color, "#abcdef");
+  assert.equal(state.interaction.expectedRevision, 1);
+  assert.deepEqual(state.interaction.current, { x: 8, y: 6 });
+});
+
+test("a remote move and color change preserve typing and refresh editor placement", () => {
+  const textShape: Shape = { id: shapeId, kind: "text", properties: { x: 10, y: 10, width: 120, height: 32, color: "#ffffff", opacity: 1, z_index: 0, text: "Original", font_size: 16 }, revision: 1, deleted: false };
+  const editing: EditorState = { ...readyState(), shapes: { [shapeId]: textShape }, interaction: { kind: "editingText", sessionId: "session-1", shapeId, expectedRevision: 1, start: { x: 10, y: 10 }, width: 120, height: 32, color: "#ffffff", fontSize: 16, draft: "My draft" } };
+  const remoteShape: Shape = { ...textShape, revision: 2, properties: { ...textShape.properties, x: 40, color: "#abcdef" } };
+  const state = editorReducer(editing, { type: "event", event: applied("remote-move", 2, remoteShape) });
+  assert.equal(state.interaction.kind, "editingText");
+  if (state.interaction.kind !== "editingText") throw new Error("Typing was cancelled");
+  assert.equal(state.interaction.draft, "My draft");
+  assert.equal(state.interaction.color, "#abcdef");
+  assert.equal(state.interaction.start.x, 40);
+  assert.equal(state.recoveredTextDraft, null);
+});
+
+test("a pending move keeps its preview over an unrelated remote color change", () => {
+  const command = { command: { type: "shape.update" as const, operation_id: operationId, shape_id: shapeId, expected_revision: 1, patch: { x: 20 } }, wire: "{}", recoveryReplay: false };
+  const pending = editorReducer(readyState(), { type: "pending", command, optimistic: { kind: "shape", shape: { ...shape, properties: { ...shape.properties, x: 20 } } } });
+  const remoteShape = { ...shape, revision: 2, properties: { ...shape.properties, color: "#abcdef" } };
+  const state = editorReducer(pending, { type: "event", event: applied("remote-color", 2, remoteShape) });
+  assert.equal(state.optimistic?.kind, "shape");
+  if (state.optimistic?.kind !== "shape") throw new Error("Preview was lost");
+  assert.equal(state.optimistic.shape.properties.color, "#abcdef");
+  assert.equal("x" in state.optimistic.shape.properties && state.optimistic.shape.properties.x, 20);
+  assert.equal(state.pending, command);
+});
+
 test("WS-06 presence and cursor messages add, update, hide, and remove peer cursors without document revisions", () => {
   const connection = "00000000-0000-4000-8000-000000000012";
   const peer = { connection_id: connection, user: { id: peerId, username: "bob" }, cursor: null };

@@ -13,6 +13,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 
 from app.auth import PublicUser, hash_session_token
+from app.canvas_conflicts import can_merge_update
 from app.canvas_history import Navigation, apply_history_command
 from app.canvas_protocol import (
     InvalidMessage,
@@ -695,14 +696,40 @@ class CanvasRooms:
                             "deleted": row["deleted"],
                         }
                         if row["revision"] != command.expected_revision:
-                            return {
-                                **_operation_error(
-                                    command.operation_id,
-                                    "conflict",
-                                    "Shape revision is stale.",
-                                ),
-                                "shape": current_shape,
-                            }, False
+                            mergeable = False
+                            if (
+                                isinstance(command, _UpdateCommand)
+                                and command.expected_revision < row["revision"]
+                                and not row["deleted"]
+                            ):
+                                history = await conn.fetch(
+                                    """SELECT after_patch, result FROM canvas_operation
+                                       WHERE canvas_id = $1 AND shape_id = $2
+                                         AND canvas_revision >= (
+                                           SELECT canvas_revision FROM canvas_operation
+                                           WHERE canvas_id = $1 AND shape_id = $2
+                                             AND result #>> '{shape,revision}' = $3
+                                         )
+                                       ORDER BY canvas_revision""",
+                                    connection.canvas_id,
+                                    command.shape_id,
+                                    str(command.expected_revision),
+                                )
+                                mergeable = can_merge_update(
+                                    command.expected_revision,
+                                    row["revision"],
+                                    command.patch,
+                                    history,
+                                )
+                            if not mergeable:
+                                return {
+                                    **_operation_error(
+                                        command.operation_id,
+                                        "conflict",
+                                        "The properties being edited have changed. Try again using the latest shape.",
+                                    ),
+                                    "shape": current_shape,
+                                }, False
                         if row["deleted"]:
                             return _operation_error(
                                 command.operation_id,

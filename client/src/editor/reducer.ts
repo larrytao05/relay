@@ -1,5 +1,6 @@
 import type { DurableCommand, EditorState, OptimisticIntent, ServerEvent, Shape, Tool } from "./types.ts";
 import { initialEditorState } from "./types.ts";
+import { changedProperties, propertiesConflict, rebaseInteraction, withPropertyPatch } from "./conflicts.ts";
 
 export type EditorAction =
   | { type: "connection.started" }
@@ -149,17 +150,21 @@ function reduceServerEvent(state: EditorState, event: Exclude<ServerEvent, { typ
     }
   }
   const recovery = isRecoveryAck ? "reset-history" : state.recovery;
-  const remoteSupersedesPreview = remoteSupersedesShape && (
-    (state.optimistic?.kind === "shape" && state.optimistic.shape.id === event.shape.id && event.shape.revision > state.optimistic.shape.revision)
-    || (state.optimistic?.kind === "delete" && state.optimistic.shapeId === event.shape.id
-      && state.pending?.command.type === "shape.delete"
-      && event.shape.revision > state.pending.command.expected_revision)
-  );
-  const interruptedDraft = remoteSupersedesShape ? getInterruptedTextDraft(state, event.shape.id) : null;
-  const cancelsInteraction = remoteSupersedesShape
-    && state.interaction.kind !== "idle"
-    && "shapeId" in state.interaction
-    && state.interaction.shapeId === event.shape.id;
+  let optimistic = isLocalAck ? null : state.optimistic;
+  if (remoteSupersedesShape && optimistic?.kind === "shape" && optimistic.shape.id === event.shape.id) {
+    const command = pending?.command;
+    optimistic = oldShape && !event.shape.deleted && command?.type === "shape.update"
+      && command.shape_id === event.shape.id
+      && !propertiesConflict(Object.keys(command.patch), changedProperties(oldShape, event.shape))
+      ? { kind: "shape", shape: withPropertyPatch(event.shape, command.patch) }
+      : null;
+  }
+  if (remoteSupersedesShape && optimistic?.kind === "delete" && optimistic.shapeId === event.shape.id) optimistic = null;
+  const interaction = remoteSupersedesShape && oldShape
+    ? rebaseInteraction(state.interaction, oldShape, event.shape)
+    : state.interaction;
+  const interruptedDraft = interaction.kind === "idle" && state.interaction.kind === "editingText"
+    ? getInterruptedTextDraft(state, event.shape.id) : null;
   return {
     ...state,
     phase: recovery === "reset-history" ? "recovering" : state.phase,
@@ -167,9 +172,9 @@ function reduceServerEvent(state: EditorState, event: Exclude<ServerEvent, { typ
     canvasRevision: isNewDocumentRevision ? event.canvas_revision : state.canvasRevision,
     shapes,
     selectionId,
-    interaction: matchedShape?.deleted || cancelsInteraction ? { kind: "idle" } : state.interaction,
+    interaction,
     pending: isLocalAck ? null : pending,
-    optimistic: isLocalAck || remoteSupersedesPreview ? null : state.optimistic,
+    optimistic,
     undoIds: isRecoveryAck ? [] : undoIds,
     redoIds: isRecoveryAck ? [] : redoIds,
     recoveredTextDraft: interruptedDraft
