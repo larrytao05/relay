@@ -1,6 +1,6 @@
 import "./App.css";
-import EditorPage from "./EditorPage.tsx";
+import SignInPage from "./SignInPage.tsx";
 
 export default function App() {
-  return <EditorPage />;
+  return <SignInPage />;
 }

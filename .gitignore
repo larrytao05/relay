@@ -8,4 +8,5 @@ __pycache__/
 .venv/
 *.egg-info/
 *.html
+client/index.html
 EDITOR_DESIGN.md
