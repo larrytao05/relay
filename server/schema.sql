@@ -39,6 +39,14 @@ CREATE TABLE IF NOT EXISTS canvas_member (
     PRIMARY KEY (canvas_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS canvas_invitation (
+    canvas_id uuid NOT NULL REFERENCES canvas (id) ON DELETE CASCADE,
+    invitee_id uuid NOT NULL REFERENCES app_user (id) ON DELETE CASCADE,
+    invited_by uuid NOT NULL REFERENCES app_user (id) ON DELETE CASCADE,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (canvas_id, invitee_id)
+);
+
 CREATE TABLE IF NOT EXISTS shape (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     canvas_id uuid NOT NULL REFERENCES canvas (id) ON DELETE CASCADE,
@@ -93,6 +101,9 @@ CREATE TABLE IF NOT EXISTS canvas_operation (
 
 CREATE INDEX IF NOT EXISTS canvas_member_user_canvas_idx
     ON canvas_member (user_id, canvas_id);
+
+CREATE INDEX IF NOT EXISTS canvas_invitation_invitee_created_idx
+    ON canvas_invitation (invitee_id, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS shape_visible_canvas_idx
     ON shape (canvas_id) WHERE deleted_at IS NULL;

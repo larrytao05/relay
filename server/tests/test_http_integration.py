@@ -18,8 +18,8 @@ class HttpPostgresIntegrationTests(unittest.TestCase):
     def test_authentication_and_canvas_access_over_http(self):
         database_url = os.environ["TEST_DATABASE_URL"]
         previous_database_url = db.DATABASE_URL
-        usernames = [f"test_{uuid4().hex[:20]}", f"test_{uuid4().hex[:20]}"]
-        owner_username, member_username = usernames
+        usernames = [f"test_{uuid4().hex[:20]}" for _ in range(3)]
+        owner_username, member_username, third_username = usernames
         db.DATABASE_URL = database_url
 
         try:
@@ -72,24 +72,56 @@ class HttpPostgresIntegrationTests(unittest.TestCase):
                     client.get(f"/api/canvases/{canvas_id}").status_code, 404
                 )
 
-                # The owner can add an existing user; membership then grants access.
+                # An invitation appears for the recipient without granting access.
                 client.cookies.clear()
                 client.cookies.set(SESSION_COOKIE_NAME, owner_token)
-                added = client.post(
-                    f"/api/canvases/{canvas_id}/members",
+                invitation = client.post(
+                    f"/api/canvases/{canvas_id}/invites",
                     json={"username": member_username},
                 )
-                self.assertEqual(added.status_code, 200)
-                self.assertEqual(added.json()["user"]["username"], member_username)
+                self.assertEqual(invitation.status_code, 200)
+                self.assertEqual(invitation.json()["user"]["username"], member_username)
 
                 client.cookies.clear()
                 client.cookies.set(SESSION_COOKIE_NAME, member_token)
+                pending = client.get("/api/canvases").json()["canvases"]
+                self.assertEqual(pending[0]["status"], "pending")
+                self.assertEqual(pending[0]["invited_by"], owner_username)
+                self.assertEqual(
+                    client.post(
+                        f"/api/canvases/{canvas_id}/invites/accept"
+                    ).status_code,
+                    204,
+                )
                 detail = client.get(f"/api/canvases/{canvas_id}")
                 self.assertEqual(detail.status_code, 200)
                 self.assertEqual(
                     {item["username"] for item in detail.json()["members"]},
                     {owner_username, member_username},
                 )
+
+                # A second invitation can be declined and removed from the list.
+                third_signup = client.post(
+                    "/api/auth/signup",
+                    json={"username": third_username, "password": "third-password"},
+                )
+                self.assertEqual(third_signup.status_code, 201)
+                third_token = third_signup.cookies[SESSION_COOKIE_NAME]
+                client.cookies.clear()
+                client.cookies.set(SESSION_COOKIE_NAME, owner_token)
+                client.post(
+                    f"/api/canvases/{canvas_id}/invites",
+                    json={"username": third_username},
+                )
+                client.cookies.clear()
+                client.cookies.set(SESSION_COOKIE_NAME, third_token)
+                self.assertEqual(
+                    client.post(
+                        f"/api/canvases/{canvas_id}/invites/decline"
+                    ).status_code,
+                    204,
+                )
+                self.assertEqual(client.get("/api/canvases").json()["canvases"], [])
 
                 # Logout revokes the session and clears its cookie.
                 logout = client.post("/api/auth/logout")

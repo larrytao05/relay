@@ -1,4 +1,4 @@
-import type { Canvas, CanvasDetail, CanvasMember } from "../types.ts";
+import type { Canvas, CanvasDetail, CanvasListEntry, CanvasMember } from "../types.ts";
 
 export type CanvasApiErrorKind = "http" | "network" | "invalid-response";
 
@@ -33,7 +33,7 @@ export function createCanvasApi(fetcher: typeof fetch = fetch) {
 
     let payload: unknown;
     try {
-      payload = await response.json();
+      payload = response.status === 204 ? null : await response.json();
     } catch (error) {
       if (init.signal?.aborted) throw error;
       if (!response.ok) {
@@ -69,12 +69,12 @@ export function createCanvasApi(fetcher: typeof fetch = fetch) {
   }
 
   return {
-    async list(signal?: AbortSignal): Promise<Canvas[]> {
+    async list(signal?: AbortSignal): Promise<CanvasListEntry[]> {
       const { payload, status } = await requestJson("/api/canvases", { signal });
       if (!isRecord(payload) || !Array.isArray(payload.canvases)) {
         throw invalidResponse(status);
       }
-      return payload.canvases.map((canvas) => parseCanvas(canvas, status));
+      return payload.canvases.map((entry) => parseCanvasListEntry(entry, status));
     },
 
     async create(title: string): Promise<Canvas> {
@@ -99,7 +99,7 @@ export function createCanvasApi(fetcher: typeof fetch = fetch) {
     },
 
     async invite(canvasId: string, username: string): Promise<CanvasMember> {
-      const path = `/api/canvases/${encodeURIComponent(canvasId)}/members`;
+      const path = `/api/canvases/${encodeURIComponent(canvasId)}/invites`;
       const { payload, status } = await requestJson(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -107,6 +107,16 @@ export function createCanvasApi(fetcher: typeof fetch = fetch) {
       });
       if (!isRecord(payload) || !("user" in payload)) throw invalidResponse(status);
       return parseCanvasMember(payload.user, status);
+    },
+
+    async acceptInvite(canvasId: string): Promise<void> {
+      const path = `/api/canvases/${encodeURIComponent(canvasId)}/invites/accept`;
+      await requestJson(path, { method: "POST" });
+    },
+
+    async declineInvite(canvasId: string): Promise<void> {
+      const path = `/api/canvases/${encodeURIComponent(canvasId)}/invites/decline`;
+      await requestJson(path, { method: "POST" });
     },
   };
 }
@@ -136,6 +146,18 @@ function parseCanvas(value: unknown, status: number): Canvas {
     createdAt: value.created_at,
     updatedAt: value.updated_at,
   };
+}
+
+function parseCanvasListEntry(value: unknown, status: number): CanvasListEntry {
+  if (!isRecord(value) || !("canvas" in value)) throw invalidResponse(status);
+  const canvas = parseCanvas(value.canvas, status);
+  if (value.status === "member" && value.invited_by === null) {
+    return { canvas, status: "member", invitedBy: null };
+  }
+  if (value.status === "pending" && typeof value.invited_by === "string") {
+    return { canvas, status: "pending", invitedBy: value.invited_by };
+  }
+  throw invalidResponse(status);
 }
 
 function parseCanvasMember(value: unknown, status: number): CanvasMember {

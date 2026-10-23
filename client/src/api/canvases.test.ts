@@ -15,7 +15,11 @@ test("list sends cookies and parses the canvas list", async () => {
   let request: { input: RequestInfo | URL; init?: RequestInit } | undefined;
   const api = createCanvasApi(async (input, init) => {
     request = { input, init };
-    return jsonResponse({ canvases: [canvasResponse] });
+    return jsonResponse({ canvases: [{
+      canvas: canvasResponse,
+      status: "member",
+      invited_by: null,
+    }] });
   });
 
   const canvases = await api.list();
@@ -23,12 +27,37 @@ test("list sends cookies and parses the canvas list", async () => {
   assert.equal(String(request?.input), "/api/canvases");
   assert.equal(request?.init?.credentials, "include");
   assert.deepEqual(canvases, [{
-    id: canvasResponse.id,
-    title: canvasResponse.title,
-    createdBy: canvasResponse.created_by,
-    revision: 2,
-    createdAt: canvasResponse.created_at,
-    updatedAt: canvasResponse.updated_at,
+    canvas: {
+      id: canvasResponse.id,
+      title: canvasResponse.title,
+      createdBy: canvasResponse.created_by,
+      revision: 2,
+      createdAt: canvasResponse.created_at,
+      updatedAt: canvasResponse.updated_at,
+    },
+    status: "member",
+    invitedBy: null,
+  }]);
+});
+
+test("list parses pending invitations with the inviter's username", async () => {
+  const api = createCanvasApi(async () => jsonResponse({ canvases: [{
+    canvas: canvasResponse,
+    status: "pending",
+    invited_by: "owner",
+  }] }));
+
+  assert.deepEqual(await api.list(), [{
+    canvas: {
+      id: canvasResponse.id,
+      title: canvasResponse.title,
+      createdBy: canvasResponse.created_by,
+      revision: 2,
+      createdAt: canvasResponse.created_at,
+      updatedAt: canvasResponse.updated_at,
+    },
+    status: "pending",
+    invitedBy: "owner",
   }]);
 });
 
@@ -65,7 +94,7 @@ test("get encodes the canvas ID and parses its members", async () => {
   assert.deepEqual(detail.members, [{ id: canvasResponse.created_by, username: "owner" }]);
 });
 
-test("invite posts a username to the canvas member endpoint", async () => {
+test("invite posts a username and creates a pending invitation", async () => {
   let request: { input: RequestInfo | URL; init?: RequestInit } | undefined;
   const api = createCanvasApi(async (input, init) => {
     request = { input, init };
@@ -74,11 +103,27 @@ test("invite posts a username to the canvas member endpoint", async () => {
 
   const member = await api.invite(canvasResponse.id, "new-member");
 
-  assert.equal(String(request?.input), `/api/canvases/${canvasResponse.id}/members`);
+  assert.equal(String(request?.input), `/api/canvases/${canvasResponse.id}/invites`);
   assert.equal(request?.init?.method, "POST");
   assert.equal(request?.init?.credentials, "include");
   assert.deepEqual(JSON.parse(String(request?.init?.body)), { username: "new-member" });
   assert.deepEqual(member, { id: canvasResponse.created_by, username: "new-member" });
+});
+
+test("accept and decline resolve invitations without expecting a response body", async () => {
+  const requests: string[] = [];
+  const api = createCanvasApi(async (input, init) => {
+    requests.push(`${init?.method} ${String(input)}`);
+    return new Response(null, { status: 204 });
+  });
+
+  await api.acceptInvite(canvasResponse.id);
+  await api.declineInvite(canvasResponse.id);
+
+  assert.deepEqual(requests, [
+    `POST /api/canvases/${canvasResponse.id}/invites/accept`,
+    `POST /api/canvases/${canvasResponse.id}/invites/decline`,
+  ]);
 });
 
 test("HTTP errors preserve status and validation feedback", async () => {

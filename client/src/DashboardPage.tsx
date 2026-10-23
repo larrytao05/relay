@@ -5,13 +5,14 @@ import { useAuth } from "./AuthContext.tsx";
 import CanvasList from "./components/CanvasList.tsx";
 import DashboardHeader from "./components/DashboardHeader.tsx";
 import DashboardHeading from "./components/DashboardHeading.tsx";
-import type { Canvas } from "./types.ts";
+import InviteDialog from "./components/editor/InviteDialog.tsx";
+import type { CanvasListEntry } from "./types.ts";
 import "./DashboardPage.css";
 
 type CanvasListState =
   | { kind: "loading" }
   | { kind: "error"; message: string }
-  | { kind: "ready"; canvases: Canvas[] };
+  | { kind: "ready"; canvases: CanvasListEntry[] };
 
 type CreateState =
   | { kind: "closed" }
@@ -24,6 +25,9 @@ export default function DashboardPage() {
   const [createState, setCreateState] = useState<CreateState>({ kind: "closed" });
   const [title, setTitle] = useState("");
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const [resolvingInviteId, setResolvingInviteId] = useState<string | null>(null);
+  const [inviteError, setInviteError] = useState("");
+  const [inviteCanvasId, setInviteCanvasId] = useState<string | null>(null);
   const { retrySessionCheck } = useAuth();
   const navigate = useNavigate();
 
@@ -61,9 +65,10 @@ export default function DashboardPage() {
     setCreateState({ kind: "submitting" });
     try {
       const canvas = await canvasApi.create(trimmedTitle);
+      const entry: CanvasListEntry = { canvas, status: "member", invitedBy: null };
       setListState((state) => state.kind === "ready"
-        ? { kind: "ready", canvases: [canvas, ...state.canvases] }
-        : { kind: "ready", canvases: [canvas] });
+        ? { kind: "ready", canvases: [entry, ...state.canvases] }
+        : { kind: "ready", canvases: [entry] });
       setTitle("");
       setCreateState({ kind: "closed" });
       navigate(`/canvases/${canvas.id}`);
@@ -73,6 +78,36 @@ export default function DashboardPage() {
         return;
       }
       setCreateState({ kind: "error", message: getErrorMessage(error) });
+    }
+  }
+
+  async function resolveInvite(canvasId: string, action: "accept" | "decline") {
+    try {
+      if (action === "accept") await canvasApi.acceptInvite(canvasId);
+      else await canvasApi.declineInvite(canvasId);
+      setListState((state) => {
+        if (state.kind !== "ready") return state;
+        const canvases: CanvasListEntry[] = action === "decline"
+          ? state.canvases.filter((entry) => entry.canvas.id !== canvasId)
+          : state.canvases.map((entry) => {
+            if (entry.canvas.id !== canvasId) return entry;
+            return { canvas: entry.canvas, status: "member", invitedBy: null } satisfies CanvasListEntry;
+          });
+        return {
+          kind: "ready",
+          canvases: canvases.sort(
+            (left, right) => Number(right.status === "pending") - Number(left.status === "pending"),
+          ),
+        };
+      });
+      return true;
+    } catch (error) {
+      if (error instanceof CanvasApiError && error.status === 401) {
+        retrySessionCheck();
+        return false;
+      }
+      setInviteError(getErrorMessage(error));
+      return false;
     }
   }
 
@@ -143,9 +178,22 @@ export default function DashboardPage() {
           </section>
         )}
         {listState.kind === "ready" && listState.canvases.length > 0 && (
-          <CanvasList canvases={listState.canvases} />
+          <CanvasList
+            canvases={listState.canvases}
+            resolvingInviteId={resolvingInviteId}
+            invitationError={inviteError}
+            onResolveInvitation={async (canvasId, action) => {
+              setResolvingInviteId(canvasId);
+              setInviteError("");
+              const resolved = await resolveInvite(canvasId, action);
+              setResolvingInviteId(null);
+              return resolved;
+            }}
+            onInvite={setInviteCanvasId}
+          />
         )}
       </main>
+      {inviteCanvasId && <InviteDialog canvasId={inviteCanvasId} onClose={() => setInviteCanvasId(null)} />}
     </div>
   );
 }

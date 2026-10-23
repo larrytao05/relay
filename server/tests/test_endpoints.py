@@ -21,6 +21,7 @@ class MemoryDatabase:
         self.sessions: dict[str, dict] = {}
         self.canvases: dict[UUID, dict] = {}
         self.canvas_members: set[tuple[UUID, UUID]] = set()
+        self.canvas_invitations: dict[tuple[UUID, UUID], UUID] = {}
 
 
 class MemoryConnection:
@@ -61,6 +62,12 @@ class MemoryConnection:
                 return canvas.copy()
             return None
 
+        if "FROM canvas_invitation" in query and "FOR UPDATE" in query:
+            key = (args[0], args[1])
+            if key in self.database.canvas_invitations:
+                return {"canvas_id": key[0], "invitee_id": key[1]}
+            return None
+
         if query.lstrip().startswith("SELECT id, username FROM app_user"):
             user = self.database.users_by_username.get(args[0])
             return {"id": user["id"], "username": user["username"]} if user else None
@@ -81,11 +88,28 @@ class MemoryConnection:
     async def fetch(self, query: str, *args):
         if "FROM canvas\n" in query and "canvas_member.user_id = $1" in query:
             user_id = args[0]
-            return [
-                self.database.canvases[canvas_id].copy()
+            memberships = [
+                {
+                    **self.database.canvases[canvas_id],
+                    "access": "member",
+                    "invited_by": None,
+                }
                 for canvas_id, member_id in self.database.canvas_members
                 if member_id == user_id
             ]
+            invitations = [
+                {
+                    **self.database.canvases[canvas_id],
+                    "access": "pending",
+                    "invited_by": self.database.users_by_id[invited_by]["username"],
+                }
+                for (
+                    canvas_id,
+                    invitee_id,
+                ), invited_by in self.database.canvas_invitations.items()
+                if invitee_id == user_id
+            ]
+            return invitations + memberships
 
         if "FROM canvas_member\n" in query:
             canvas_id = args[0]
@@ -118,6 +142,14 @@ class MemoryConnection:
         if query.lstrip().startswith("INSERT INTO canvas_member"):
             self.database.canvas_members.add((args[0], args[1]))
             return "INSERT 0 1"
+
+        if query.lstrip().startswith("INSERT INTO canvas_invitation"):
+            self.database.canvas_invitations.setdefault((args[0], args[1]), args[2])
+            return "INSERT 0 1"
+
+        if query.lstrip().startswith("DELETE FROM canvas_invitation"):
+            self.database.canvas_invitations.pop((args[0], args[1]), None)
+            return "DELETE 1"
 
         if query.lstrip().startswith("DELETE FROM auth_session"):
             self.database.sessions.pop(args[0], None)
@@ -257,7 +289,7 @@ class EndpointHandlerTests(unittest.TestCase):
         with self.assertRaises(HTTPException):
             self.run_async(auth.current_user(session_token=token))
 
-    def test_create_canvas_adds_creator_and_list_shows_only_memberships(self):
+    def test_create_canvas_adds_creator_and_lists_memberships(self):
         user, _ = self.signup()
 
         created = self.run_async(
@@ -269,9 +301,12 @@ class EndpointHandlerTests(unittest.TestCase):
 
         self.assertEqual(created.canvas.title, "Design review")
         self.assertIn((created.canvas.id, user.user.id), self.database.canvas_members)
-        self.assertEqual([canvas.id for canvas in listed.canvases], [created.canvas.id])
+        self.assertEqual(
+            [entry.canvas.id for entry in listed.canvases], [created.canvas.id]
+        )
+        self.assertEqual(listed.canvases[0].status, "member")
 
-    def test_member_endpoint_grants_access_and_hides_canvas_from_nonmembers(self):
+    def test_invitation_stays_pending_until_accepted_and_can_be_declined(self):
         owner, _ = self.signup(username="owner")
         invited, _ = self.signup(username="invitee")
         canvas = self.run_async(
@@ -279,28 +314,60 @@ class EndpointHandlerTests(unittest.TestCase):
                 canvases.CanvasCreateRequest(title="Team board"), owner.user
             )
         ).canvas
+        member_canvas = self.run_async(
+            canvases.create_canvas(
+                canvases.CanvasCreateRequest(title="Member board"), owner.user
+            )
+        ).canvas
+        self.database.canvas_members.add((member_canvas.id, invited.user.id))
 
-        added = self.run_async(
-            canvases.add_canvas_member(
+        invitation = self.run_async(
+            canvases.create_canvas_invitation(
                 canvas.id,
-                canvases.MemberRequest(username=" INVITEE "),
+                canvases.InviteRequest(username=" INVITEE "),
                 owner.user,
             )
         )
-        opened = self.run_async(canvases.get_canvas(canvas.id, invited.user))
+        listed = self.run_async(canvases.list_canvases(invited.user))
         repeated = self.run_async(
-            canvases.add_canvas_member(
+            canvases.create_canvas_invitation(
                 canvas.id,
-                canvases.MemberRequest(username="invitee"),
+                canvases.InviteRequest(username="invitee"),
                 owner.user,
             )
         )
 
-        self.assertEqual(added["user"].id, invited.user.id)
+        self.assertEqual(invitation["user"].id, invited.user.id)
         self.assertEqual(repeated["user"].id, invited.user.id)
+        self.assertEqual(
+            [entry.status for entry in listed.canvases], ["pending", "member"]
+        )
+        self.assertEqual(listed.canvases[0].invited_by, owner.user.username)
+        self.assertNotIn((canvas.id, invited.user.id), self.database.canvas_members)
+
+        with self.assertRaises(HTTPException) as denied:
+            self.run_async(canvases.get_canvas(canvas.id, invited.user))
+        self.assertEqual(denied.exception.status_code, 404)
+
+        self.run_async(canvases.accept_canvas_invitation(canvas.id, invited.user))
+        self.assertNotIn((canvas.id, invited.user.id), self.database.canvas_invitations)
+        opened = self.run_async(canvases.get_canvas(canvas.id, invited.user))
         self.assertEqual(
             {member.id for member in opened.members}, {owner.user.id, invited.user.id}
         )
+        self.run_async(canvases.accept_canvas_invitation(canvas.id, invited.user))
+
+        other, _ = self.signup(username="other")
+        self.run_async(
+            canvases.create_canvas_invitation(
+                canvas.id, canvases.InviteRequest(username="other"), owner.user
+            )
+        )
+        self.run_async(canvases.decline_canvas_invitation(canvas.id, other.user))
+        self.assertNotIn((canvas.id, other.user.id), self.database.canvas_invitations)
+        with self.assertRaises(HTTPException) as declined:
+            self.run_async(canvases.accept_canvas_invitation(canvas.id, other.user))
+        self.assertEqual(declined.exception.status_code, 404)
 
         outsider = auth.PublicUser(id=uuid4(), username="outsider")
         with self.assertRaises(HTTPException) as denied:
@@ -309,9 +376,9 @@ class EndpointHandlerTests(unittest.TestCase):
 
         with self.assertRaises(HTTPException) as unauthorized_add:
             self.run_async(
-                canvases.add_canvas_member(
+                canvases.create_canvas_invitation(
                     canvas.id,
-                    canvases.MemberRequest(username="invitee"),
+                    canvases.InviteRequest(username="invitee"),
                     outsider,
                 )
             )
@@ -319,9 +386,9 @@ class EndpointHandlerTests(unittest.TestCase):
 
         with self.assertRaises(HTTPException) as missing_invitee:
             self.run_async(
-                canvases.add_canvas_member(
+                canvases.create_canvas_invitation(
                     canvas.id,
-                    canvases.MemberRequest(username="unknown"),
+                    canvases.InviteRequest(username="unknown"),
                     owner.user,
                 )
             )

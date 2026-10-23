@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -34,7 +34,7 @@ class CanvasCreateRequest(BaseModel):
         return title.strip() if isinstance(title, str) else title
 
 
-class MemberRequest(BaseModel):
+class InviteRequest(BaseModel):
     username: str
 
     @field_validator("username")
@@ -47,8 +47,25 @@ class CanvasResponse(BaseModel):
     canvas: Canvas
 
 
+class MemberCanvasListEntry(BaseModel):
+    canvas: Canvas
+    status: Literal["member"]
+    invited_by: None = None
+
+
+class PendingCanvasListEntry(BaseModel):
+    canvas: Canvas
+    status: Literal["pending"]
+    invited_by: str
+
+
+CanvasListEntry = Annotated[
+    MemberCanvasListEntry | PendingCanvasListEntry, Field(discriminator="status")
+]
+
+
 class CanvasListResponse(BaseModel):
-    canvases: list[Canvas]
+    canvases: list[CanvasListEntry]
 
 
 class CanvasDetailResponse(BaseModel):
@@ -69,15 +86,33 @@ async def list_canvases(
         rows = await conn.fetch(
             """
             SELECT canvas.id, canvas.title, canvas.created_by, canvas.revision,
-                   canvas.created_at, canvas.updated_at
+                   canvas.created_at, canvas.updated_at, 'member' AS access,
+                   NULL::text AS invited_by, 1 AS access_order
             FROM canvas
             JOIN canvas_member ON canvas_member.canvas_id = canvas.id
             WHERE canvas_member.user_id = $1
-            ORDER BY canvas.updated_at DESC, canvas.id
+            UNION ALL
+            SELECT canvas.id, canvas.title, canvas.created_by, canvas.revision,
+                   canvas.created_at, canvas.updated_at, 'pending' AS access,
+                   inviter.username AS invited_by, 0 AS access_order
+            FROM canvas_invitation
+            JOIN canvas ON canvas.id = canvas_invitation.canvas_id
+            JOIN app_user AS inviter ON inviter.id = canvas_invitation.invited_by
+            WHERE canvas_invitation.invitee_id = $1
+            ORDER BY access_order, updated_at DESC, id
             """,
             user.id,
         )
-    return CanvasListResponse(canvases=[_canvas(row) for row in rows])
+    return CanvasListResponse(
+        canvases=[
+            PendingCanvasListEntry(
+                canvas=_canvas(row), status="pending", invited_by=row["invited_by"]
+            )
+            if row["access"] == "pending"
+            else MemberCanvasListEntry(canvas=_canvas(row), status="member")
+            for row in rows
+        ]
+    )
 
 
 @router.post("", response_model=CanvasResponse, status_code=status.HTTP_201_CREATED)
@@ -147,11 +182,11 @@ async def get_canvas(
 
 
 @router.post(
-    "/{canvas_id}/members", response_model=UserResponse, status_code=status.HTTP_200_OK
+    "/{canvas_id}/invites", response_model=UserResponse, status_code=status.HTTP_200_OK
 )
-async def add_canvas_member(
+async def create_canvas_invitation(
     canvas_id: UUID,
-    request: MemberRequest,
+    request: InviteRequest,
     user: Annotated[PublicUser, Depends(require_authenticated_user)],
 ) -> dict[str, PublicUser]:
     pool = await get_pool()
@@ -179,13 +214,96 @@ async def add_canvas_member(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="User not found."
             )
-        await conn.execute(
+        is_already_member = await conn.fetchval(
             """
-            INSERT INTO canvas_member (canvas_id, user_id)
-            VALUES ($1, $2)
-            ON CONFLICT (canvas_id, user_id) DO NOTHING
+            SELECT EXISTS (
+                SELECT 1 FROM canvas_member
+                WHERE canvas_id = $1 AND user_id = $2
+            )
             """,
             canvas_id,
             invitee["id"],
         )
+        if is_already_member:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="User already has access to this canvas.",
+            )
+        await conn.execute(
+            """
+            INSERT INTO canvas_invitation (canvas_id, invitee_id, invited_by)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (canvas_id, invitee_id) DO NOTHING
+            """,
+            canvas_id,
+            invitee["id"],
+            user.id,
+        )
     return {"user": PublicUser.model_validate(dict(invitee))}
+
+
+async def _resolve_invitation(canvas_id: UUID, user_id: UUID, *, accept: bool) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        invitation = await conn.fetchrow(
+            """
+            SELECT canvas_id, invitee_id
+            FROM canvas_invitation
+            WHERE canvas_id = $1 AND invitee_id = $2
+            FOR UPDATE
+            """,
+            canvas_id,
+            user_id,
+        )
+        if invitation is None:
+            is_member = await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM canvas_member
+                    WHERE canvas_id = $1 AND user_id = $2
+                )
+                """,
+                canvas_id,
+                user_id,
+            )
+            if accept and is_member:
+                return
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Invitation not found.",
+            )
+
+        if accept:
+            await conn.execute(
+                """
+                INSERT INTO canvas_member (canvas_id, user_id)
+                VALUES ($1, $2)
+                ON CONFLICT (canvas_id, user_id) DO NOTHING
+                """,
+                canvas_id,
+                user_id,
+            )
+        await conn.execute(
+            """
+            DELETE FROM canvas_invitation
+            WHERE canvas_id = $1 AND invitee_id = $2
+            """,
+            canvas_id,
+            user_id,
+        )
+
+
+@router.post("/{canvas_id}/invites/accept", status_code=status.HTTP_204_NO_CONTENT)
+async def accept_canvas_invitation(
+    canvas_id: UUID,
+    user: Annotated[PublicUser, Depends(require_authenticated_user)],
+) -> None:
+    await _resolve_invitation(canvas_id, user.id, accept=True)
+
+
+@router.post("/{canvas_id}/invites/decline", status_code=status.HTTP_204_NO_CONTENT)
+async def decline_canvas_invitation(
+    canvas_id: UUID,
+    user: Annotated[PublicUser, Depends(require_authenticated_user)],
+) -> None:
+    await _resolve_invitation(canvas_id, user.id, accept=False)

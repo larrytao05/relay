@@ -7,6 +7,10 @@ export type Canvas = {
   updatedAt: string;
 };
 
+export type CanvasListEntry =
+  | { canvas: Canvas; status: "member"; invitedBy: null }
+  | { canvas: Canvas; status: "pending"; invitedBy: string };
+
 export type CanvasMember = {
   id: string;
   username: string;

@@ -106,6 +106,12 @@
 .editor-dialog input:focus { outline: 3px solid rgb(73 104 215 / 18%); border-color: var(--editor-blue); }
 .editor-dialog-close { position: absolute; top: 13px; right: 15px; border: 0; background: transparent; color: #768392; font-size: 22px !important; }
 .editor-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.invite-members { margin: 18px 0; padding: 14px; border: 1px solid #edf0f3; border-radius: 8px; background: #fafbfd; }
+.invite-members h3 { margin: 0 0 10px; color: #82909f; font-size: 11px; font-weight: 700; letter-spacing: .035em; }
+.invite-members ul { display: flex; flex-wrap: wrap; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.invite-members li { padding: 5px 9px; border: 1px solid #e2e7ec; border-radius: 99px; background: #fff; color: #536276; font-size: 12px; }
+.invite-members-note, .invite-members-error { margin: 0 !important; font-size: 12px !important; }
+.invite-members-error { color: #a34848 !important; }
 .invite-message { margin: 9px 0 0 !important; }
 .invite-message.is-success { color: #287a59; }
 .invite-message.is-error { color: #a34848; }

@@ -15,12 +15,14 @@ Public user objects contain `id` and `username`. Password hashes and session tok
 | POST | `/api/auth/login` | `{username, password}` | `200 {user}` and a new session cookie. |
 | POST | `/api/auth/logout` | None | `204`, delete the session, clear its cookie, and close its open canvas connections. Repeated logout also returns `204`. |
 | GET | `/api/auth/me` | None | `200 {user}` for the current session. |
-| GET | `/api/canvases` | None | `200 {canvases: [...]}` containing only canvases the user belongs to. |
+| GET | `/api/canvases` | None | `200 {canvases: [...]}` containing memberships and pending invitations, with pending invitations first. |
 | POST | `/api/canvases` | `{title}` | `201 {canvas}`. Create the canvas and its creator's membership in one transaction. |
 | GET | `/api/canvases/{canvas_id}` | None | `200 {canvas, members}` for a member. Shapes arrive in the WebSocket snapshot. |
-| POST | `/api/canvases/{canvas_id}/members` | `{username}` | `200 {user}`. Immediately add an existing account by normalized username. Repeated requests have the same result. |
+| POST | `/api/canvases/{canvas_id}/invites` | `{username}` | `200 {user}`. Create a pending invitation for an existing account by normalized username. Repeated requests are safe. |
+| POST | `/api/canvases/{canvas_id}/invites/accept` | None | `204`. Accept the current user's pending invitation and add membership atomically. |
+| POST | `/api/canvases/{canvas_id}/invites/decline` | None | `204`. Decline the current user's pending invitation. |
 
-The member endpoint grants access immediately for this simple version. A future pending-invitation flow can add an invitation inbox and accept/decline endpoints; recipients do not need to accept membership in the current version.
+Canvas list entries contain `{canvas, status, invited_by}`. `status` is `member` or `pending`; `invited_by` is null for memberships and the inviter's username for pending invitations. Only canvas members can open a canvas or invite others. An invitation does not grant access until the recipient accepts it.
 
 Canvas objects contain `id`, `title`, `created_by`, `revision`, `created_at`, and `updated_at`.
 Normalize usernames with whitespace trimming and lowercase conversion. Accept 3-32 ASCII letters, digits, underscores, or hyphens.
