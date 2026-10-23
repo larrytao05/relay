@@ -5,7 +5,7 @@ import json
 import os
 import unittest
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -301,11 +301,16 @@ class CanvasRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
         canvas_id = uuid4()
         socket = _DisconnectingSocket()
         identity = SessionIdentity(
-            "digest", PublicUser(id=uuid4(), username="tester"), datetime.now(UTC)
+            "digest",
+            PublicUser(id=uuid4(), username="tester"),
+            datetime.now(UTC) + timedelta(hours=1),
         )
         with (
             patch.object(rooms, "_authenticate", AsyncMock(return_value=identity)),
             patch.object(rooms, "_snapshot", AsyncMock(return_value={"shapes": []})),
+            patch.object(
+                rooms, "_connection_access_valid", AsyncMock(return_value=True)
+            ),
         ):
             serving = asyncio.create_task(rooms.serve(socket, canvas_id))
             room = None

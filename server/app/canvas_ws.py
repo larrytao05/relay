@@ -5,7 +5,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import asyncpg
@@ -79,6 +79,7 @@ class Connection:
     cursor: dict[str, float] | None = None
     history: Navigation = field(default_factory=Navigation)
     sender_task: asyncio.Task[None] | None = None
+    expiry_task: asyncio.Task[None] | None = None
     detached: bool = False
 
 
@@ -98,20 +99,102 @@ class CanvasRooms:
         pool: object | None = None,
         allowed_origins: frozenset[str] | None = None,
         queue_capacity: int = 32,
+        expiry_check_interval: float = 1.0,
     ) -> None:
         self.pool = pool
         self.allowed_origins = (
             allowed_origins if allowed_origins is not None else _allowed_origins()
         )
         self.queue_capacity = queue_capacity
+        self.expiry_check_interval = expiry_check_interval
         self._rooms: dict[UUID, Room] = {}
+        self._connections: dict[UUID, tuple[Room, Connection]] = {}
         self._rooms_lock = asyncio.Lock()
         self._closing = False
         self._serving: set[asyncio.Task[None]] = set()
         self._shutdown_task: asyncio.Task[None] | None = None
 
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(UTC)
+
     async def _db_pool(self):
         return self.pool if self.pool is not None else await get_pool()
+
+    async def _connection_access_valid(self, connection: Connection) -> bool:
+        if self._now() >= connection.identity.expires_at:
+            return False
+        pool = await self._db_pool()
+        async with pool.acquire() as conn:
+            return bool(
+                await conn.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM auth_session
+                        JOIN canvas_member
+                          ON canvas_member.user_id = auth_session.user_id
+                        WHERE auth_session.token_hash = $1
+                          AND auth_session.expires_at > now()
+                          AND canvas_member.canvas_id = $2
+                    )
+                    """,
+                    connection.identity.token_hash,
+                    connection.canvas_id,
+                )
+            )
+
+    async def _expire_when_needed(self, connection: Connection, room: Room) -> None:
+        while not connection.detached:
+            await asyncio.sleep(self.expiry_check_interval)
+            if self._now() < connection.identity.expires_at:
+                continue
+            async with room.lock:
+                if not connection.detached:
+                    self._detach_locked(room, connection)
+            await self._stop_delivery(connection)
+            await self._close_socket(connection.socket, 1008)
+            return
+
+    async def _stop_delivery(self, connection: Connection) -> None:
+        current = asyncio.current_task()
+        sender = connection.sender_task
+        if sender is not None and sender is not current and not sender.done():
+            sender.cancel()
+            await asyncio.gather(sender, return_exceptions=True)
+        while True:
+            try:
+                connection.outbound.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        expiry = connection.expiry_task
+        if expiry is not None and expiry is not current and not expiry.done():
+            expiry.cancel()
+            await asyncio.gather(expiry, return_exceptions=True)
+
+    async def revoke_session(self, token_hash: str) -> None:
+        """Detach all live tabs for one credential, then stop their delivery."""
+        async with self._rooms_lock:
+            rooms = tuple(self._rooms.values())
+        revoked: dict[UUID, Connection] = {}
+        for room in rooms:
+            async with room.lock:
+                for connection in tuple(room.connections.values()):
+                    if connection.identity.token_hash == token_hash:
+                        self._detach_locked(room, connection)
+                        revoked[connection.id] = connection
+        async with self._rooms_lock:
+            tracked = tuple(self._connections.values())
+        revoked.update(
+            {
+                connection.id: connection
+                for _, connection in tracked
+                if connection.identity.token_hash == token_hash
+            }
+        )
+        for connection in revoked.values():
+            await self._stop_delivery(connection)
+            await self._close_socket(connection.socket, 1008)
 
     async def _authenticate(
         self, socket: WebSocket, canvas_id: UUID
@@ -252,6 +335,9 @@ class CanvasRooms:
                 if self._closing:
                     close_code = 1001
                     return
+                if not await self._connection_access_valid(connection):
+                    close_code = 1008
+                    return
                 pool = await self._db_pool()
                 async with pool.acquire() as conn:
                     snapshot = await self._snapshot(conn, canvas_id)
@@ -260,6 +346,8 @@ class CanvasRooms:
                     return
                 room.connections[connection.id] = connection
                 registered = True
+                async with self._rooms_lock:
+                    self._connections[connection.id] = (room, connection)
                 snapshot.update(
                     {
                         "type": "snapshot",
@@ -288,6 +376,10 @@ class CanvasRooms:
                     name=f"canvas-sender-{connection.id}",
                 )
                 connection.sender_task = sender
+                connection.expiry_task = asyncio.create_task(
+                    self._expire_when_needed(connection, room),
+                    name=f"canvas-expiry-{connection.id}",
+                )
 
             await self._receive_loop(connection, room)
         except WebSocketDisconnect:
@@ -324,6 +416,12 @@ class CanvasRooms:
         if registered:
             async with room.lock:
                 self._detach_locked(room, connection)
+        async with self._rooms_lock:
+            self._connections.pop(connection.id, None)
+        expiry = connection.expiry_task
+        if expiry is not None and expiry is not asyncio.current_task():
+            expiry.cancel()
+            await asyncio.gather(expiry, return_exceptions=True)
         await self._release_room(connection.canvas_id, room)
         if close_code is not None:
             await self._close_socket(connection.socket, close_code)
@@ -359,30 +457,56 @@ class CanvasRooms:
                     async with room.lock:
                         if connection.detached:
                             return
-                        connection.cursor = (
-                            None
-                            if command.position is None
-                            else command.position.model_dump()
-                        )
-                        self._broadcast_locked(
-                            room,
-                            {
-                                "type": "cursor",
-                                "connection_id": str(connection.id),
-                                "user_id": str(connection.identity.user.id),
-                                "position": connection.cursor,
-                            },
-                            exclude=connection.id,
-                        )
+                        if not await self._connection_access_valid(connection):
+                            self._detach_locked(room, connection)
+                            revoked = True
+                        else:
+                            revoked = False
+                        if revoked:
+                            close_code = 1008
+                        else:
+                            close_code = None
+                        if revoked:
+                            pass
+                        else:
+                            connection.cursor = (
+                                None
+                                if command.position is None
+                                else command.position.model_dump()
+                            )
+                            self._broadcast_locked(
+                                room,
+                                {
+                                    "type": "cursor",
+                                    "connection_id": str(connection.id),
+                                    "user_id": str(connection.identity.user.id),
+                                    "position": connection.cursor,
+                                },
+                                exclude=connection.id,
+                            )
+                    if revoked:
+                        await self._stop_delivery(connection)
+                        await self._close_socket(connection.socket, close_code)
+                        return
                     continue
                 if isinstance(
                     command, (_CreateCommand, _UpdateCommand, _DeleteCommand)
                 ):
                     async with room.lock:
-                        message, applied = await self._apply_shape_command(
-                            connection, command
-                        )
-                        if applied:
+                        if connection.detached:
+                            return
+                        if not await self._connection_access_valid(connection):
+                            self._detach_locked(room, connection)
+                            revoked = True
+                            message, applied = {}, False
+                        else:
+                            revoked = False
+                            message, applied = await self._apply_shape_command(
+                                connection, command
+                            )
+                        if revoked:
+                            slow = []
+                        elif applied:
                             connection.history.record_edit(command.operation_id)
                             room.operation_origins[command.operation_id] = connection.id
                             slow = [
@@ -390,21 +514,35 @@ class CanvasRooms:
                                 for peer in list(room.connections.values())
                                 if not self._enqueue_locked(room, peer, message)
                             ]
-                        else:
+                        elif not revoked:
                             slow = (
                                 [connection]
                                 if not self._enqueue_locked(room, connection, message)
                                 else []
                             )
+                    if revoked:
+                        await self._stop_delivery(connection)
+                        await self._close_socket(connection.socket, 1008)
+                        return
                     for peer in slow:
                         await self._close_slow_connection(peer)
                     continue
                 if isinstance(command, (_UndoCommand, _RedoCommand)):
                     async with room.lock:
-                        message, applied = await self._apply_history_command(
-                            connection, room, command
-                        )
-                        if applied:
+                        if connection.detached:
+                            return
+                        if not await self._connection_access_valid(connection):
+                            self._detach_locked(room, connection)
+                            revoked = True
+                            message, applied = {}, False
+                        else:
+                            revoked = False
+                            message, applied = await self._apply_history_command(
+                                connection, room, command
+                            )
+                        if revoked:
+                            slow = []
+                        elif applied:
                             if isinstance(command, _UndoCommand):
                                 connection.history.record_undo(
                                     command.target_operation_id, command.operation_id
@@ -419,12 +557,16 @@ class CanvasRooms:
                                 for peer in list(room.connections.values())
                                 if not self._enqueue_locked(room, peer, message)
                             ]
-                        else:
+                        elif not revoked:
                             slow = (
                                 [connection]
                                 if not self._enqueue_locked(room, connection, message)
                                 else []
                             )
+                    if revoked:
+                        await self._stop_delivery(connection)
+                        await self._close_socket(connection.socket, 1008)
+                        return
                     for peer in slow:
                         await self._close_slow_connection(peer)
                     continue
@@ -434,10 +576,22 @@ class CanvasRooms:
                     "message": "This command is not available yet.",
                 }
             async with room.lock:
-                if not self._enqueue_locked(room, connection, message):
-                    close_slow = True
-                else:
+                if connection.detached:
+                    return
+                if not await self._connection_access_valid(connection):
+                    self._detach_locked(room, connection)
+                    revoked = True
                     close_slow = False
+                else:
+                    revoked = False
+                    if not self._enqueue_locked(room, connection, message):
+                        close_slow = True
+                    else:
+                        close_slow = False
+            if revoked:
+                await self._stop_delivery(connection)
+                await self._close_socket(connection.socket, 1008)
+                return
             if close_slow:
                 await self._close_slow_connection(connection)
                 return

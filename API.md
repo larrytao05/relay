@@ -1,6 +1,6 @@
 # Whiteboard API contract
 
-This is the API contract. `GET /health`, authentication, canvas management, authenticated WebSocket snapshots, and shape creation, updates, and soft deletes are implemented. Presence, cursor broadcasts, and connection-scoped undo/redo are implemented. Live session revocation remains planned.
+This is the API contract. `GET /health`, authentication, canvas management, authenticated WebSocket snapshots, and shape creation, updates, and soft deletes are implemented. Presence, cursor broadcasts, and connection-scoped undo/redo are implemented. Logout revocation and idle session expiry are implemented.
 Use HTTP for accounts and canvas membership, and one WebSocket per open canvas for edits and presence.
 
 ## HTTP endpoints
@@ -39,8 +39,10 @@ Return the same login error for unknown usernames and incorrect passwords.
 Connect to `/ws/canvases/{canvas_id}` using the same cookie. Authenticate and check membership before accepting the connection.
 The existing Vite `/ws` proxy supports this path.
 
+Logout closes every canvas connection using that exact session, including tabs on different canvases; other logins for the account remain active. Idle connections check their recorded session expiry once per second and close with WebSocket code `1008` after expiry. Every incoming frame rechecks persisted session and membership. Logout serializes with admitted room commands, detaches revoked connections, and stops their queued delivery before returning.
+
 The first server message is a `snapshot` containing the canvas, its `canvas_revision`, all visible shapes, current presence, and this connection's `connection_id`.
-The snapshot's `connections` list includes each active connection, including this tab, with `connection_id`, public `user`, and `cursor`. Cursor positions remain null until cursor handling is implemented.
+The snapshot's `connections` list includes each active connection, including this tab, with `connection_id`, public `user`, and `cursor`. Cursor positions contain each connection's latest canvas coordinates, or null when hidden.
 Subscribe and load the snapshot under the same canvas queue used for edits so that an update cannot disappear between those steps.
 Reconnect by obtaining a fresh snapshot.
 
@@ -73,10 +75,9 @@ Reject reuse of an ID for a different command or actor. Derive actor and canvas 
 
 Durable commands run in a canvas-scoped queue. One database transaction updates the shape, inserts `canvas_operation`, and increments the canvas revision.
 Capture inverse patches on the server. Broadcast only after commit, in revision order. Clients apply acknowledged results only when their revisions are newer than local canonical state. An exact retry can return an older original acknowledgement; use it to settle the pending request without replacing a newer shape or lowering the canvas revision.
-An operation error leaves durable state and the canvas revision unchanged.
+An operation error leaves durable state and the canvas revision unchanged. Error codes include `invalid_message`, `invalid_patch`, `operation_id_reused`, `shape_unavailable`, `shape_deleted`, `conflict`, `history_unavailable`, `undo_conflict`, and `operation_failed`. A lost session or membership closes the socket with `1008`; a transaction that loses access can also return `access_revoked`.
 
-Undo and redo are per user, never a whole-canvas snapshot restore. They must check later edits before applying an inverse and refuse a conflicting undo rather than erase another user's work.
-The initial implementation may conservatively reject undo after any later edit to that shape; allowing undo across unrelated property changes requires additional provenance checks.
+Undo and redo are scoped to one connection and use recorded inverse patches. They refuse later still-effective edits from another connection, including another tab of the same account and edits to different properties. Consecutive undos and redos on a shape remain eligible when only that connection's reversed actions intervene.
 Keep undo navigation stacks scoped to the user's current canvas connection. Canvas contents persist across sessions; undo stacks do not need to.
 
 A drag should create one undo entry. Local drag previews can render immediately; a later transient `shape.preview` message can show movement to peers without persisting every pointer event.

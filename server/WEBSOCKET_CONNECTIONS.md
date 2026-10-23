@@ -23,6 +23,12 @@ Room locks and connection state live in process memory. Multiple workers would h
 
 Shutdown cancels and awaits in-flight connection handlers and senders. Socket-close attempts run independently and time out after one second so a blocked transport cannot stall other peers. A cancelled handshake releases its room lease.
 
+## Session lifetime
+
+Logout deletes the database session, detaches all connections for its token digest across canvases under room locks, stops their senders and queued delivery, and closes them with code `1008` before returning. Other sessions for the same user remain connected. Session and membership are rechecked for incoming frames and at subscription.
+
+Each accepted connection has an owned expiry task. The default check interval is **1 second**; it compares the recorded session expiry against the room clock. Expired idle connections detach and close with `1008`. Disconnect and shutdown cancel and await expiry tasks. Tests inject the clock to advance expiry without waiting for a real session lifetime.
+
 The endpoint authenticates, sends snapshots, and accepts `shape.create`, `shape.update`, `shape.delete`, and `cursor`. Presence joins and leaves identify each tab independently. Invalid messages receive `invalid_message`. Undo and redo persist inverse operations and protect later collaborator edits; navigation resets on reconnect.
 
 Run the backend tests from `server` with the test database configured:

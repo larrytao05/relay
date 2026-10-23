@@ -4,7 +4,7 @@ Implementation is broken into eight tickets in [WEBSOCKET_TICKETS.md](WEBSOCKET_
 
 ## Problem
 
-`main.py` has a placeholder `/ws` route. The backend already has cookie sessions, canvas membership, an asyncpg pool, and tables for shapes and operations. The WebSocket needs one ordering rule across snapshot delivery, edits, and presence. The server targets one Uvicorn worker and 2–5 collaborators per canvas.
+The original `/ws` placeholder has been replaced by `/ws/canvases/{canvas_id}`. The backend already has cookie sessions, canvas membership, an asyncpg pool, and tables for shapes and operations. The WebSocket needs one ordering rule across snapshot delivery, edits, and presence. The server targets one Uvicorn worker and 2–5 collaborators per canvas.
 
 ## Usage
 
@@ -13,7 +13,7 @@ Implementation is broken into eight tickets in [WEBSOCKET_TICKETS.md](WEBSOCKET_
 ```python
 rooms = CanvasRooms(pool, allowed_origins)
 app.state.canvas_rooms = rooms
-app.include_router(rooms.router)
+app.include_router(canvas_ws_router)  # module-level router
 
 # WebSocket route
 await rooms.serve(socket, canvas_id)
@@ -40,8 +40,7 @@ class Connection:
     identity: SessionIdentity
     socket: WebSocket
     outbound: asyncio.Queue[dict[str, object]]
-    undo: list[UUID]
-    redo: list[UUID]
+    history: Navigation
     cursor: Point | None
 
 @dataclass
@@ -55,17 +54,17 @@ class CanvasRooms:
     async def close(self) -> None: ...
 ```
 
-The handler parses JSON into private Pydantic command types at the socket boundary. Command helpers accept those typed values. They validate shape properties by kind, check the expected shape revision, and write the shape, operation, and next canvas revision in one transaction. They return a typed outcome such as `Applied`, `Conflict`, or `Refused`.
+The handler parses JSON into private Pydantic command types at the socket boundary. Command helpers accept those typed values. They validate shape properties by kind, check the expected shape revision, and write the shape, operation, and next canvas revision in one transaction. They return the response payload and whether a new operation committed; exact retries and refusals do not alter navigation or broadcast.
 
 Each room owns one lock. Snapshot loading and connection registration happen under that lock. Durable commands update PostgreSQL under the lock, commit, then enqueue the resulting event to each connection before releasing it. A per-connection sender drains a bounded outbound queue, so network writes never hold the room lock. A slow client is disconnected and reconnects with a fresh snapshot.
 
 Connection state is keyed by `connection_id`, not user ID. Each tab therefore has its own cursor and undo/redo navigation. Room state is transient. PostgreSQL remains authoritative for shapes and operation history.
 
-Authentication uses the existing session cookie and session lookup. The socket checks the configured `Origin`, session, and canvas membership before acceptance. Commands recheck session validity and membership. Logout closes all sockets for that session. An expiry task closes idle sockets when their session expires.
+Authentication uses the existing session cookie and session lookup. The socket checks the configured `Origin`, session, and canvas membership before acceptance. Commands recheck session validity and membership. Logout closes all sockets for that session. One owned expiry task per connection checks the recorded expiry every second against an injectable clock, then detaches and closes an expired socket with `1008`. Cleanup cancels and awaits that task.
 
 ## Persistence change
 
-`canvas_operation` now has JSONB `request` and `result` columns alongside its before and after patches. The fresh schema and `migrations/001_operation_replay.sql` require populated values to be objects and permit both to be null for legacy rows. The future command handler must populate both columns, compare the saved actor, canvas, and request on retry, and return the saved result for an exact retry. Reject reuse with different input and legacy IDs whose requests cannot be verified.
+`canvas_operation` now has JSONB `request` and `result` columns alongside its before and after patches. The fresh schema and `migrations/001_operation_replay.sql` require populated values to be objects and permit both to be null for legacy rows. Durable command handlers populate both columns, compare the saved actor, canvas, and request on retry, and return the saved result for an exact retry. Reject reuse with different input and legacy IDs whose requests cannot be verified.
 
 Operation IDs are globally unique. Handle a concurrent unique-key collision by reading the winning row and comparing its actor, canvas, and request. Do not rely on the per-canvas in-memory lock to protect IDs used in different canvases.
 
@@ -82,7 +81,7 @@ Operation IDs are globally unique. Handle a concurrent unique-key collision by r
 
 ## Synthesis decision
 
-Candidate A's cohesive room owner is the base. It scored better on ordering ownership, session revocation, retry semantics, and interface depth. Candidate B's split modules would make the route coordinate locking, commands, and event delivery. Keep B's typed command outcomes and pure shape-transition helpers private inside `canvas_ws.py` until command logic earns a separate persistence boundary.
+Candidate A's cohesive room owner is the base. It scored better on ordering ownership, session revocation, retry semantics, and interface depth. Candidate B's split modules would make the route coordinate locking, commands, and event delivery. Pure validation lives in `canvas_protocol.py`; history inverses and navigation live in `canvas_history.py`. Room admission, commit ordering, and delivery remain owned by `CanvasRooms`.
 
 The independent cross-judge also recommended A. It identified two corrections included here: persist immutable request/result data for idempotent retries, and handle global operation-ID collisions across canvases. The judge also recommended one Uvicorn worker because in-memory rooms cannot coordinate across processes.
 
@@ -101,13 +100,13 @@ An actor task and mailbox per canvas. This gives each canvas one writer, but add
 
 ## Implementation reconciliation
 
-WS-01 implements private command models, parsing, shape validation, and patch merging in `canvas_protocol.py`. WS-02 implements replay columns and the rerunnable migration. WS-03 registers the canvas socket and implements authenticated snapshots, room leases, bounded outbound queues, and shutdown. The application lifespan owns one `CanvasRooms` instance. A public `serve` wrapper tracks connection handlers so shutdown also cleans up in-flight handshakes; private helpers keep room behavior in `canvas_ws.py`, while pure validation lives in `canvas_protocol.py`. Independent Luna reviews found oversized-number parsing and handshake/shutdown cleanup errors; regression tests and boundary fixes resolve them. WS-04 implements transactional shape creation, exact retry acknowledgements, and ordered committed broadcasts; its independent review approved without confirmed bugs. WS-05 adds updates, soft deletes, and whole-shape revision conflicts through the shared transaction path. WS-06 adds tab-scoped presence joins/leaves and transient cursors through room queues. WS-07 adds connection-local navigation and transactional inverses in `canvas_history.py`. Room state records operation origins so another tab of the same user counts as a collaborator. Live session revocation remains future work.
+WS-01 implements private command models, parsing, shape validation, and patch merging in `canvas_protocol.py`. WS-02 implements replay columns and the rerunnable migration. WS-03 registers the canvas socket and implements authenticated snapshots, room leases, bounded outbound queues, and shutdown. The application lifespan owns one `CanvasRooms` instance. A public `serve` wrapper tracks connection handlers so shutdown also cleans up in-flight handshakes; private helpers keep room behavior in `canvas_ws.py`, while pure validation lives in `canvas_protocol.py`. Independent Luna reviews found oversized-number parsing and handshake/shutdown cleanup errors; regression tests and boundary fixes resolve them. WS-04 implements transactional shape creation, exact retry acknowledgements, and ordered committed broadcasts; its independent review approved without confirmed bugs. WS-05 adds updates, soft deletes, and whole-shape revision conflicts through the shared transaction path. WS-06 adds tab-scoped presence joins/leaves and transient cursors through room queues. WS-07 adds connection-local navigation and transactional inverses in `canvas_history.py`. Room state records operation origins so another tab of the same user counts as a collaborator. WS-08 wires logout to exact-session revocation across canvases, rechecks access at subscription and incoming frames, and closes idle expired sessions on a one-second polling interval. Logout stops sender delivery and drains queued messages before returning.
 
 ## Open questions and risks
 
 - Deployment must use one Uvicorn worker. Multiple workers need cross-process pub/sub and coordinated snapshot subscription.
 - Operation request/result records must remain available as long as retries are accepted. If operation history is pruned, the retry window needs an explicit limit.
 
-## Next implementation step
+## Verification status
 
-Implement WS-08's session revocation and idle expiry, then run the deferred independent review.
+All eight tickets are implemented. The integrated PostgreSQL-enabled backend suite passes 52 tests, including the two-account create/update/cursor/undo/redo/reconnect flow. Independent review of the remaining tickets is pending.

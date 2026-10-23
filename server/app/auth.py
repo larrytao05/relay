@@ -9,7 +9,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from asyncpg import UniqueViolationError
-from fastapi import APIRouter, Cookie, HTTPException, Response, status
+from fastapi import APIRouter, Cookie, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, field_validator
 
 from app.db import get_pool
@@ -205,15 +205,20 @@ async def login(credentials: Credentials, response: Response) -> UserResponse:
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(
     response: Response,
+    request: Request,
     session_token: Annotated[str | None, Cookie(alias=SESSION_COOKIE_NAME)] = None,
 ) -> Response:
     if session_token:
+        token_hash = hash_session_token(session_token)
         pool = await get_pool()
         async with pool.acquire() as conn:
             await conn.execute(
                 "DELETE FROM auth_session WHERE token_hash = $1",
-                hash_session_token(session_token),
+                token_hash,
             )
+        rooms = getattr(request.app.state, "canvas_rooms", None)
+        if rooms is not None:
+            await rooms.revoke_session(token_hash)
     response.delete_cookie(
         key=SESSION_COOKIE_NAME,
         httponly=True,

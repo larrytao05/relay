@@ -3,11 +3,13 @@ import unittest
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from http.cookies import SimpleCookie
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 from asyncpg import UniqueViolationError
 from fastapi import HTTPException, Response
+from starlette.requests import Request
 
 from app import auth, canvases
 
@@ -240,13 +242,18 @@ class EndpointHandlerTests(unittest.TestCase):
         self.assertEqual(expired.exception.status_code, 401)
 
         logout_response = Response()
-        self.run_async(auth.logout(logout_response, session_token=token))
+        request = Request(
+            {"type": "http", "app": SimpleNamespace(state=SimpleNamespace())}
+        )
+        self.run_async(
+            auth.logout(logout_response, request=request, session_token=token)
+        )
         self.assertEqual(logout_response.status_code, 204)
         self.assertNotIn(token_hash, self.database.sessions)
         self.assertIn('session=""', logout_response.headers["set-cookie"])
 
         # Logout is safe to repeat, including after the session has been removed.
-        self.run_async(auth.logout(Response(), session_token=token))
+        self.run_async(auth.logout(Response(), request=request, session_token=token))
         with self.assertRaises(HTTPException):
             self.run_async(auth.current_user(session_token=token))
 
