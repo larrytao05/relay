@@ -101,7 +101,7 @@ An actor task and mailbox per canvas. This gives each canvas one writer, but add
 
 ## Implementation reconciliation
 
-WS-01 implements private command models, parsing, shape validation, and patch merging in `canvas_ws.py`. WS-02 implements replay columns and the rerunnable migration. WS-03 registers the canvas socket and implements authenticated snapshots, room leases, bounded outbound queues, and shutdown. The application lifespan owns one `CanvasRooms` instance. A public `serve` wrapper tracks connection handlers so shutdown also cleans up in-flight handshakes; private helpers retain protocol and room behavior in the same module. Independent Luna reviews found oversized-number parsing and handshake/shutdown cleanup errors; regression tests and boundary fixes resolve them. Durable commands, broadcasts, history, and session revocation remain future work.
+WS-01 implements private command models, parsing, shape validation, and patch merging in `canvas_ws.py`. WS-02 implements replay columns and the rerunnable migration. WS-03 registers the canvas socket and implements authenticated snapshots, room leases, bounded outbound queues, and shutdown. The application lifespan owns one `CanvasRooms` instance. A public `serve` wrapper tracks connection handlers so shutdown also cleans up in-flight handshakes; private helpers retain protocol and room behavior in the same module. Independent Luna reviews found oversized-number parsing and handshake/shutdown cleanup errors; regression tests and boundary fixes resolve them. WS-04 implements transactional shape creation, exact retry acknowledgements, and ordered committed broadcasts; its independent review approved without confirmed bugs. Shape updates/deletes, presence/cursor broadcasts, history, and session revocation remain future work.
 
 ## Open questions and risks
 
@@ -110,4 +110,4 @@ WS-01 implements private command models, parsing, shape validation, and patch me
 
 ## Next implementation step
 
-Implement WS-04's shape creation and ordered committed broadcasts; WS-06's presence and cursors can also begin after WS-03.
+Implement WS-05's updates, soft deletes, and conflicts, then proceed to WS-06's presence and cursors.

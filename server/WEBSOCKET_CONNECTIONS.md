@@ -23,7 +23,7 @@ Room locks and connection state live in process memory. Multiple workers would h
 
 Shutdown cancels and awaits in-flight connection handlers and senders. Socket-close attempts run independently and time out after one second so a blocked transport cannot stall other peers. A cancelled handshake releases its room lease.
 
-The endpoint currently authenticates and sends snapshots. Invalid messages receive `invalid_message`; valid commands receive `feature_not_available` until their editing and cursor tickets are implemented.
+The endpoint authenticates, sends snapshots, and accepts `shape.create`. Invalid messages receive `invalid_message`; other valid commands receive `feature_not_available` until their tickets are implemented.
 
 Run the backend tests from `server` with the test database configured:
 

@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
+import asyncpg
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -49,6 +50,25 @@ class InvalidMessage(Exception):
         if self.operation_id is not None:
             result["operation_id"] = str(self.operation_id)
         return result
+
+
+class _ShapeIdConflict(Exception):
+    """A create attempted to reuse an existing shape identifier."""
+
+
+def _operation_error(operation_id: UUID, code: str, message: str) -> dict[str, object]:
+    return {
+        "type": "error",
+        "operation_id": str(operation_id),
+        "code": code,
+        "message": message,
+    }
+
+
+def _json_value(value: object) -> object:
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
 
 
 class _Command(BaseModel):
@@ -522,10 +542,29 @@ class CanvasRooms:
         while True:
             raw = await connection.socket.receive_text()
             try:
-                _parse_client_message(raw)
+                command = _parse_client_message(raw)
             except InvalidMessage as error:
                 message = error.to_message()
+                applied = False
             else:
+                if isinstance(command, _CreateCommand):
+                    async with room.lock:
+                        message, applied = await self._create_shape(connection, command)
+                        if applied:
+                            slow = [
+                                peer
+                                for peer in list(room.connections.values())
+                                if not self._enqueue_locked(room, peer, message)
+                            ]
+                        else:
+                            slow = (
+                                [connection]
+                                if not self._enqueue_locked(room, connection, message)
+                                else []
+                            )
+                    for peer in slow:
+                        await self._close_slow_connection(peer)
+                    continue
                 message = {
                     "type": "error",
                     "code": "feature_not_available",
@@ -539,6 +578,157 @@ class CanvasRooms:
             if close_slow:
                 await self._close_slow_connection(connection)
                 return
+
+    async def _create_shape(
+        self, connection: Connection, command: _CreateCommand
+    ) -> tuple[dict[str, object], bool]:
+        request = command.model_dump(mode="json")
+        pool = await self._db_pool()
+        try:
+            async with pool.acquire() as conn:  # noqa: SIM117
+                async with conn.transaction():
+                    access = await conn.fetchrow(
+                        """
+                        SELECT canvas.revision
+                        FROM canvas
+                        JOIN canvas_member ON canvas_member.canvas_id = canvas.id
+                        JOIN auth_session ON auth_session.user_id = canvas_member.user_id
+                        WHERE canvas.id = $1
+                          AND canvas_member.user_id = $2
+                          AND auth_session.token_hash = $3
+                          AND auth_session.expires_at > now()
+                        FOR UPDATE OF canvas
+                        """,
+                        connection.canvas_id,
+                        connection.identity.user.id,
+                        connection.identity.token_hash,
+                    )
+                    if access is None:
+                        return _operation_error(
+                            command.operation_id,
+                            "access_revoked",
+                            "Canvas access is no longer available.",
+                        ), False
+
+                    previous = await conn.fetchrow(
+                        """SELECT canvas_id, actor_id, request, result
+                           FROM canvas_operation WHERE id = $1""",
+                        command.operation_id,
+                    )
+                    if previous is not None:
+                        saved_request = _json_value(previous["request"])
+                        saved_result = _json_value(previous["result"])
+                        if (
+                            previous["canvas_id"] == connection.canvas_id
+                            and previous["actor_id"] == connection.identity.user.id
+                            and saved_request == request
+                            and isinstance(saved_result, dict)
+                        ):
+                            return saved_result, False
+                        return _operation_error(
+                            command.operation_id,
+                            "operation_id_reused",
+                            "Operation ID was already used for another request.",
+                        ), False
+
+                    try:
+                        await conn.execute(
+                            """INSERT INTO shape (id, canvas_id, kind, properties)
+                               VALUES ($1, $2, $3, $4::jsonb)""",
+                            command.shape_id,
+                            connection.canvas_id,
+                            command.kind,
+                            json.dumps(command.properties),
+                        )
+                    except asyncpg.UniqueViolationError:
+                        # Shape IDs are global as well; a retry cannot replace a row.
+                        raise _ShapeIdConflict from None
+
+                    revision = access["revision"] + 1
+                    shape = {
+                        "id": str(command.shape_id),
+                        "kind": command.kind,
+                        "properties": command.properties,
+                        "revision": 1,
+                        "deleted": False,
+                    }
+                    result: dict[str, object] = {
+                        "type": "operation.applied",
+                        "operation_id": str(command.operation_id),
+                        "actor_id": str(connection.identity.user.id),
+                        "kind": "create",
+                        "target_operation_id": None,
+                        "canvas_revision": revision,
+                        "shape": shape,
+                    }
+                    await conn.execute(
+                        """UPDATE canvas SET revision = $2, updated_at = now()
+                           WHERE id = $1""",
+                        connection.canvas_id,
+                        revision,
+                    )
+                    await conn.execute(
+                        """INSERT INTO canvas_operation
+                           (id, canvas_id, shape_id, actor_id, canvas_revision, kind,
+                            before_patch, after_patch, request, result)
+                           VALUES ($1, $2, $3, $4, $5, 'create', '{}'::jsonb,
+                                   $6::jsonb, $7::jsonb, $8::jsonb)""",
+                        command.operation_id,
+                        connection.canvas_id,
+                        command.shape_id,
+                        connection.identity.user.id,
+                        revision,
+                        json.dumps(
+                            {"kind": command.kind, "properties": command.properties}
+                        ),
+                        json.dumps(request),
+                        json.dumps(result),
+                    )
+                    return result, True
+        except _ShapeIdConflict:
+            return _operation_error(
+                command.operation_id,
+                "shape_unavailable",
+                "Shape ID is already in use.",
+            ), False
+        except asyncpg.UniqueViolationError:
+            # A different canvas lock cannot serialize a globally unique operation ID.
+            try:
+                async with pool.acquire() as conn:
+                    winner = await conn.fetchrow(
+                        "SELECT canvas_id, actor_id, request, result FROM canvas_operation WHERE id = $1",
+                        command.operation_id,
+                    )
+            except asyncpg.PostgresError:
+                logger.exception("Could not inspect operation ID collision")
+                return _operation_error(
+                    command.operation_id,
+                    "operation_failed",
+                    "Operation could not be saved.",
+                ), False
+            if winner is not None:
+                if (
+                    winner["canvas_id"] == connection.canvas_id
+                    and winner["actor_id"] == connection.identity.user.id
+                    and _json_value(winner["request"]) == request
+                    and isinstance(_json_value(winner["result"]), dict)
+                ):
+                    return _json_value(winner["result"]), False
+                return _operation_error(
+                    command.operation_id,
+                    "operation_id_reused",
+                    "Operation ID was already used for another request.",
+                ), False
+            return _operation_error(
+                command.operation_id, "shape_unavailable", "Shape ID is already in use."
+            ), False
+        except asyncpg.PostgresError:
+            logger.exception("Canvas create transaction failed")
+            return _operation_error(
+                command.operation_id,
+                "operation_failed",
+                "Operation could not be saved.",
+            ), False
 
     def _enqueue_locked(
         self, room: Room, connection: Connection, message: dict[str, object]

@@ -2,7 +2,7 @@
 
 These tickets implement the backend design in [WEBSOCKET_DESIGN.md](WEBSOCKET_DESIGN.md) and the messages in [API.md](../API.md). Accounts and canvas management already exist. Frontend drawing interactions and socket wiring are separate work.
 
-WS-01 through WS-03 are implemented. Tests cover protocol validation, replay storage, database upgrades, authenticated snapshots, and connection cleanup. Independent reviews are recorded in [reviews/ws01-ws02/summary.md](reviews/ws01-ws02/summary.md) and [reviews/ws03/summary.md](reviews/ws03/summary.md). WS-04 through WS-08 remain unimplemented.
+WS-01 through WS-04 are implemented. Tests cover protocol validation, replay storage, database upgrades, authenticated snapshots, connection cleanup, and durable shape creation. Independent reviews are recorded in [reviews/ws01-ws02/summary.md](reviews/ws01-ws02/summary.md), [reviews/ws03/summary.md](reviews/ws03/summary.md), and [reviews/ws04/summary.md](reviews/ws04/summary.md). WS-05 through WS-08 remain unimplemented.
 
 ## Build order
 
