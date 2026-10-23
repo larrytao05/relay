@@ -115,6 +115,16 @@ class CanvasWebSocketPostgresTests(unittest.TestCase):
                         second_snapshot["connection_id"],
                     )
                     self.assertEqual(len(second_snapshot["connections"]), 2)
+                    joined = first.receive_json()
+                    self.assertEqual(joined["type"], "presence.joined")
+                    self.assertEqual(
+                        joined["connection_id"], second_snapshot["connection_id"]
+                    )
+                left = first.receive_json()
+                self.assertEqual(left["type"], "presence.left")
+                self.assertEqual(
+                    left["connection_id"], second_snapshot["connection_id"]
+                )
                 # The remaining tab stays usable after its sibling disconnects.
                 first.send_text("not-json")
                 self.assertEqual(first.receive_json()["code"], "invalid_message")

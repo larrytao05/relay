@@ -479,6 +479,18 @@ class CanvasRooms:
                     }
                 )
                 connection.outbound.put_nowait(jsonable_encoder(snapshot))
+                self._broadcast_locked(
+                    room,
+                    {
+                        "type": "presence.joined",
+                        "connection_id": str(connection.id),
+                        "user": {
+                            "id": str(connection.identity.user.id),
+                            "username": connection.identity.user.username,
+                        },
+                    },
+                    exclude=connection.id,
+                )
                 sender = asyncio.create_task(
                     self._guarded_send_loop(connection),
                     name=f"canvas-sender-{connection.id}",
@@ -536,6 +548,10 @@ class CanvasRooms:
             raise
         except Exception:
             logger.exception("Canvas sender failed for connection %s", connection.id)
+            room = self._rooms.get(connection.canvas_id)
+            if room is not None:
+                async with room.lock:
+                    self._detach_locked(room, connection)
             await self._close_socket(connection.socket, 1011)
 
     async def _receive_loop(self, connection: Connection, room: Room) -> None:
@@ -547,6 +563,26 @@ class CanvasRooms:
                 message = error.to_message()
                 applied = False
             else:
+                if isinstance(command, _CursorCommand):
+                    async with room.lock:
+                        if connection.detached:
+                            return
+                        connection.cursor = (
+                            None
+                            if command.position is None
+                            else command.position.model_dump()
+                        )
+                        self._broadcast_locked(
+                            room,
+                            {
+                                "type": "cursor",
+                                "connection_id": str(connection.id),
+                                "user_id": str(connection.identity.user.id),
+                                "position": connection.cursor,
+                            },
+                            exclude=connection.id,
+                        )
+                    continue
                 if isinstance(
                     command, (_CreateCommand, _UpdateCommand, _DeleteCommand)
                 ):
@@ -864,12 +900,26 @@ class CanvasRooms:
             self._detach_locked(room, connection)
             return False
 
-    @staticmethod
-    def _detach_locked(room: Room, connection: Connection) -> bool:
+    def _broadcast_locked(
+        self,
+        room: Room,
+        message: dict[str, object],
+        exclude: UUID | None = None,
+    ) -> None:
+        for recipient in tuple(room.connections.values()):
+            if recipient.id != exclude:
+                self._enqueue_locked(room, recipient, message)
+
+    def _detach_locked(self, room: Room, connection: Connection) -> bool:
         if connection.detached:
             return False
         connection.detached = True
-        room.connections.pop(connection.id, None)
+        removed = room.connections.pop(connection.id, None)
+        if removed is not None:
+            self._broadcast_locked(
+                room,
+                {"type": "presence.left", "connection_id": str(connection.id)},
+            )
         return True
 
     async def _close_slow_connection(self, connection: Connection) -> None:

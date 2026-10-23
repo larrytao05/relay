@@ -485,27 +485,32 @@ def command_for(operation_id, shape_id, kind, properties):
 
 
 def _receive_json(socket, timeout=2):
+    # Editing tests consume durable results; presence has its own event assertions.
     async def receive():
         with anyio.fail_after(timeout):
-            message = await socket._send_rx.receive()
-        socket._raise_on_close(message)
-        return json.loads(message["text"])
+            while True:
+                message = await socket._send_rx.receive()
+                socket._raise_on_close(message)
+                event = json.loads(message["text"])
+                if event["type"] not in {"presence.joined", "presence.left"}:
+                    return event
 
     return socket.portal.call(receive)
 
 
 def _receive_nowait_json(socket):
     def receive_nowait():
-        try:
-            return socket._send_rx.receive_nowait()
-        except anyio.WouldBlock:
-            return None
+        while True:
+            try:
+                message = socket._send_rx.receive_nowait()
+            except anyio.WouldBlock:
+                return None
+            socket._raise_on_close(message)
+            event = json.loads(message["text"])
+            if event["type"] not in {"presence.joined", "presence.left"}:
+                return event
 
-    message = socket.portal.call(receive_nowait)
-    if message is None:
-        return None
-    socket._raise_on_close(message)
-    return json.loads(message["text"])
+    return socket.portal.call(receive_nowait)
 
 
 def awaitable_result(awaitable):
