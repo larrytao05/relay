@@ -84,6 +84,12 @@
 .editor-color-code button { padding: 0 9px; border: 1px solid var(--editor-line); border-radius: 6px; background: #fff; font-size: 12px; font-weight: 600; }
 .editor-color-code button:disabled { cursor: not-allowed; opacity: .5; }
 .editor-color-error { margin: 7px 0 0; color: #a34848; font-size: 11px; }
+.editor-opacity-control input[type="range"] { display: block; width: 100%; margin: 12px 0; accent-color: var(--editor-blue); }
+.editor-opacity-label { display: flex; justify-content: space-between; color: #82909f; font-size: 11px; }
+.editor-opacity-label label { color: inherit; }
+.editor-opacity-control button, .editor-arrange-actions button { min-height: 34px; padding: 0 9px; border: 1px solid var(--editor-line); border-radius: 6px; background: #fff; font-size: 12px; font-weight: 600; }
+.editor-opacity-control button:disabled, .editor-arrange-actions button:disabled { cursor: not-allowed; opacity: .5; }
+.editor-arrange-actions { display: grid; grid-template-columns: 1fr; gap: 8px; }
 .editor-delete-button { display: flex; width: 100%; min-height: 36px; align-items: center; gap: 8px; padding: 0; border: 0; background: transparent; color: #9a5b5b !important; text-align: left; }
 .editor-delete-button svg { width: 16px; height: 16px; }
 .editor-notice { position: absolute; z-index: 5; top: 82px; left: 50%; display: flex; align-items: center; gap: 14px; max-width: min(520px, calc(100% - 32px)); padding: 9px 13px; transform: translateX(-50%); border: 1px solid #e7d3ad; border-radius: 8px; background: #fff8e9; box-shadow: 0 4px 16px rgb(29 42 60 / 8%); color: #69552d; font-size: 12px; }

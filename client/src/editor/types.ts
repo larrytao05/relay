@@ -1,7 +1,8 @@
 export type Point = { x: number; y: number };
 export type ShapeKind = "rectangle" | "ellipse" | "line" | "text";
+export type AppearanceProperties = { opacity: number; z_index: number };
 
-export type BoxProperties = {
+export type BoxProperties = AppearanceProperties & {
   x: number;
   y: number;
   width: number;
@@ -9,7 +10,7 @@ export type BoxProperties = {
   color: string;
 };
 
-export type LineProperties = {
+export type LineProperties = AppearanceProperties & {
   x1: number;
   y1: number;
   x2: number;

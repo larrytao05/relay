@@ -56,6 +56,8 @@ class CanvasRooms:
 
 The handler parses JSON into private Pydantic command types at the socket boundary. Command helpers accept those typed values. They validate shape properties by kind, check the expected shape revision, and write the shape, operation, and next canvas revision in one transaction. They return the response payload and whether a new operation committed; exact retries and refusals do not alter navigation or broadcast.
 
+Every shape also stores `opacity` (from 0 to 1) and `z_index`. Old shapes default to fully opaque and retain their prior deterministic ID order. Canvas rendering sorts by ascending `z_index`, then shape ID. Opacity and layer changes use ordinary revision-checked shape updates, so they persist, broadcast, and participate in connection-local undo/redo.
+
 Each room owns one lock. Snapshot loading and connection registration happen under that lock. Durable commands update PostgreSQL under the lock, commit, then enqueue the resulting event to each connection before releasing it. A per-connection sender drains a bounded outbound queue, so network writes never hold the room lock. A slow client is disconnected and reconnects with a fresh snapshot.
 
 Connection state is keyed by `connection_id`, not user ID. Each tab therefore has its own cursor and undo/redo navigation. Room state is transient. PostgreSQL remains authoritative for shapes and operation history.

@@ -86,18 +86,21 @@ function parseShape(value: unknown): Shape {
   }
   const properties = value.properties;
   if (typeof properties.color !== "string" || !/^#[0-9a-f]{6}$/i.test(properties.color)) throw new Error("The server sent an invalid shape color.");
+  const opacity = properties.opacity === undefined ? 1 : properties.opacity;
+  const zIndex = properties.z_index === undefined ? 0 : properties.z_index;
+  if (!finite(opacity) || opacity < 0 || opacity > 1 || !finite(zIndex)) throw new Error("The server sent invalid shape appearance properties.");
   const base = { id: value.id, revision: value.revision, deleted: value.deleted };
   switch (value.kind) {
     case "rectangle":
     case "ellipse":
       if (!finite(properties.x) || !finite(properties.y) || !positive(properties.width) || !positive(properties.height)) throw new Error("The server sent invalid shape geometry.");
-      return { ...base, kind: value.kind, properties: { x: properties.x, y: properties.y, width: properties.width, height: properties.height, color: properties.color } };
+      return { ...base, kind: value.kind, properties: { x: properties.x, y: properties.y, width: properties.width, height: properties.height, color: properties.color, opacity, z_index: zIndex } };
     case "line":
       if (!finite(properties.x1) || !finite(properties.y1) || !finite(properties.x2) || !finite(properties.y2)) throw new Error("The server sent invalid line geometry.");
-      return { ...base, kind: "line", properties: { x1: properties.x1, y1: properties.y1, x2: properties.x2, y2: properties.y2, color: properties.color } };
+      return { ...base, kind: "line", properties: { x1: properties.x1, y1: properties.y1, x2: properties.x2, y2: properties.y2, color: properties.color, opacity, z_index: zIndex } };
     case "text":
       if (!finite(properties.x) || !finite(properties.y) || !positive(properties.width) || !positive(properties.height) || !positive(properties.font_size) || typeof properties.text !== "string" || properties.text.length > 10_000) throw new Error("The server sent invalid text properties.");
-      return { ...base, kind: "text", properties: { x: properties.x, y: properties.y, width: properties.width, height: properties.height, color: properties.color, text: properties.text, font_size: properties.font_size } };
+      return { ...base, kind: "text", properties: { x: properties.x, y: properties.y, width: properties.width, height: properties.height, color: properties.color, opacity, z_index: zIndex, text: properties.text, font_size: properties.font_size } };
     default:
       throw new Error("The server sent an unsupported shape kind.");
   }

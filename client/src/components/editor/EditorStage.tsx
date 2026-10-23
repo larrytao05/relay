@@ -207,19 +207,19 @@ export default function EditorStage({
 function ShapeView({ shape }: { shape: Shape }) {
   if (shape.kind === "rectangle") {
     const p = shape.properties;
-    return <g data-shape-id={shape.id}><rect x={p.x} y={p.y} width={p.width} height={p.height} rx="10" fill={p.color} fillOpacity="0.6" stroke={p.color} strokeWidth="1.5" /></g>;
+    return <g data-shape-id={shape.id} opacity={p.opacity}><rect x={p.x} y={p.y} width={p.width} height={p.height} rx="10" fill={p.color} stroke={p.color} strokeWidth="1.5" /></g>;
   }
   if (shape.kind === "ellipse") {
     const p = shape.properties;
-    return <g data-shape-id={shape.id}><ellipse cx={p.x + p.width / 2} cy={p.y + p.height / 2} rx={p.width / 2} ry={p.height / 2} fill={p.color} fillOpacity="0.6" stroke={p.color} strokeWidth="1.5" /></g>;
+    return <g data-shape-id={shape.id} opacity={p.opacity}><ellipse cx={p.x + p.width / 2} cy={p.y + p.height / 2} rx={p.width / 2} ry={p.height / 2} fill={p.color} stroke={p.color} strokeWidth="1.5" /></g>;
   }
   if (shape.kind === "line") {
     const p = shape.properties;
-    return <g data-shape-id={shape.id}><line x1={p.x1} y1={p.y1} x2={p.x2} y2={p.y2} fill="none" stroke="transparent" strokeWidth="12" pointerEvents="stroke" /><line x1={p.x1} y1={p.y1} x2={p.x2} y2={p.y2} fill="none" stroke={p.color} strokeWidth="2" vectorEffect="non-scaling-stroke" /></g>;
+    return <g data-shape-id={shape.id} opacity={p.opacity}><line x1={p.x1} y1={p.y1} x2={p.x2} y2={p.y2} fill="none" stroke="transparent" strokeWidth="12" pointerEvents="stroke" /><line x1={p.x1} y1={p.y1} x2={p.x2} y2={p.y2} fill="none" stroke={p.color} strokeWidth="2" vectorEffect="non-scaling-stroke" /></g>;
   }
   if (shape.kind !== "text") return null;
   const p = shape.properties;
-  return <g data-shape-id={shape.id}>
+  return <g data-shape-id={shape.id} opacity={p.opacity}>
     <foreignObject x={p.x} y={p.y} width={p.width} height={p.height}>
       <div style={{ width: "100%", height: "100%", overflow: "hidden", whiteSpace: "pre-wrap", overflowWrap: "anywhere", color: p.color, fontSize: p.font_size, lineHeight: 1.35 }}>{p.text}</div>
     </foreignObject>

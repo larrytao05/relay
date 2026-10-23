@@ -34,6 +34,8 @@ export default function EditorPage() {
       : [...visibleShapes, optimistic.shape];
   }
   const selected = visibleShapes.find((shape) => shape.id === state.selectionId) ?? null;
+  const orderedShapes = [...visibleShapes].sort((a, b) => a.properties.z_index - b.properties.z_index || a.id.localeCompare(b.id));
+  const selectedLayer = orderedShapes.findIndex((shape) => shape.id === selected?.id);
   const preview = getInteractionPreview(state.interaction);
 
   const setTool = useCallback((tool: Tool) => dispatch({ type: "tool", tool }), [dispatch]);
@@ -81,11 +83,11 @@ export default function EditorPage() {
       let shape: Shape | null = null;
       if (active.shapeKind === "line") {
         if (Math.hypot(point.x - active.start.x, point.y - active.start.y) >= 8) {
-          shape = { id: crypto.randomUUID(), kind: "line", revision: 1, deleted: false, properties: { x1: active.start.x, y1: active.start.y, x2: point.x, y2: point.y, color: active.color } };
+          shape = { id: crypto.randomUUID(), kind: "line", revision: 1, deleted: false, properties: { x1: active.start.x, y1: active.start.y, x2: point.x, y2: point.y, color: active.color, opacity: 1, z_index: nextZIndex(state.shapes) } };
         }
       } else {
         const box = normalizedBox(active.start, point, active.color);
-        if (box) shape = { id: crypto.randomUUID(), kind: active.shapeKind, revision: 1, deleted: false, properties: box };
+        if (box) shape = { id: crypto.randomUUID(), kind: active.shapeKind, revision: 1, deleted: false, properties: { ...box, opacity: 1, z_index: nextZIndex(state.shapes) } };
       }
       if (shape) {
         const command = { type: "shape.create" as const, operation_id: crypto.randomUUID(), shape_id: shape.id, kind: shape.kind, properties: shape.properties };
@@ -104,7 +106,7 @@ export default function EditorPage() {
       }
       dispatch({ type: "interaction", interaction: { kind: "idle" } });
     }
-  }, [dispatch, sendOperation]);
+  }, [dispatch, sendOperation, state.shapes]);
 
   const beginTextEdit = useCallback((shape: Extract<Shape, { kind: "text" }>) => {
     if (!editable) return;
@@ -143,7 +145,7 @@ export default function EditorPage() {
         dispatch({ type: "interaction", interaction: { kind: "idle" } });
         return;
       }
-      const shape: Shape = { id: crypto.randomUUID(), kind: "text", revision: 1, deleted: false, properties: { x: active.start.x, y: active.start.y, width: active.width, height: active.height, text: value, font_size: active.fontSize, color: active.color } };
+      const shape: Shape = { id: crypto.randomUUID(), kind: "text", revision: 1, deleted: false, properties: { x: active.start.x, y: active.start.y, width: active.width, height: active.height, text: value, font_size: active.fontSize, color: active.color, opacity: 1, z_index: nextZIndex(state.shapes) } };
       const command = { type: "shape.create" as const, operation_id: crypto.randomUUID(), shape_id: shape.id, kind: "text" as const, properties: shape.properties };
       if (sendOperation(command, { kind: "shape", shape })) dispatch({ type: "selection", id: shape.id });
     } else {
@@ -195,6 +197,24 @@ export default function EditorPage() {
     const shape = withColor(selected, color);
     sendOperation({ type: "shape.update", operation_id: crypto.randomUUID(), shape_id: selected.id, expected_revision: selected.revision, patch: { color } }, { kind: "shape", shape });
   }, [dispatch, editable, selected, sendOperation]);
+
+  const changeAppearance = useCallback((patch: { opacity?: number; z_index?: number }) => {
+    if (!selected || !editable) return;
+    const shape = withAppearance(selected, patch);
+    sendOperation({ type: "shape.update", operation_id: crypto.randomUUID(), shape_id: selected.id, expected_revision: selected.revision, patch }, { kind: "shape", shape });
+  }, [editable, selected, sendOperation]);
+
+  const moveSelectedToFront = useCallback(() => {
+    if (!selected || !editable) return;
+    const highest = Math.max(...visibleShapes.map((shape) => shape.properties.z_index));
+    changeAppearance({ z_index: highest + 1 });
+  }, [changeAppearance, editable, selected, visibleShapes]);
+
+  const moveSelectedToBack = useCallback(() => {
+    if (!selected || !editable) return;
+    const lowest = Math.min(...visibleShapes.map((shape) => shape.properties.z_index));
+    changeAppearance({ z_index: lowest - 1 });
+  }, [changeAppearance, editable, selected, visibleShapes]);
 
   const deleteSelection = useCallback(() => {
     if (!selected || !editable) return;
@@ -272,7 +292,7 @@ export default function EditorPage() {
           title={state.canvas?.title ?? "Whiteboard"}
           tool={state.tool}
           disabled={!editable}
-          shapes={visibleShapes}
+          shapes={orderedShapes}
           selectedId={state.selectionId}
           peers={Object.values(state.peers)}
           interaction={state.interaction}
@@ -289,7 +309,7 @@ export default function EditorPage() {
           onCancelText={cancelText}
           onCursor={sendCursor}
         />
-        <SelectionInspector selected={selected} shapes={visibleShapes} defaultColor={state.defaultColor} disabled={!editable} onColor={changeColor} onDelete={deleteSelection} />
+        <SelectionInspector selected={selected} shapes={visibleShapes} defaultColor={state.defaultColor} disabled={!editable} canBringToFront={selectedLayer >= 0 && selectedLayer < orderedShapes.length - 1} canSendToBack={selectedLayer > 0} onColor={changeColor} onOpacity={(opacity) => changeAppearance({ opacity })} onBringToFront={moveSelectedToFront} onSendToBack={moveSelectedToBack} onDelete={deleteSelection} />
         <EditorToolbar activeTool={state.tool} canUndo={state.undoIds.length > 0} canRedo={state.redoIds.length > 0} disabled={!editable} onTool={setTool} onUndo={undo} onRedo={redo} />
       </div>
       {(state.notice || state.recoveredTextDraft) && <div className="editor-notice" role={state.phase === "failed" || state.recoveredTextDraft ? "alert" : "status"}>
@@ -345,4 +365,26 @@ function withColor(shape: Shape, color: string): Shape {
       return exhaustive;
     }
   }
+}
+
+function withAppearance(shape: Shape, patch: { opacity?: number; z_index?: number }): Shape {
+  switch (shape.kind) {
+    case "rectangle":
+      return { ...shape, properties: { ...shape.properties, ...patch } };
+    case "ellipse":
+      return { ...shape, properties: { ...shape.properties, ...patch } };
+    case "line":
+      return { ...shape, properties: { ...shape.properties, ...patch } };
+    case "text":
+      return { ...shape, properties: { ...shape.properties, ...patch } };
+    default: {
+      const exhaustive: never = shape;
+      return exhaustive;
+    }
+  }
+}
+
+function nextZIndex(shapes: Record<string, Shape>): number {
+  const active = Object.values(shapes).filter((shape) => !shape.deleted);
+  return active.length === 0 ? 0 : Math.max(...active.map((shape) => shape.properties.z_index)) + 1;
 }

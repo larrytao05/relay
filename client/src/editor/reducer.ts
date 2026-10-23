@@ -209,6 +209,8 @@ function getActiveTextDraft(state: EditorState): EditorState["recoveredTextDraft
     text: interaction.draft,
     font_size: interaction.fontSize,
     color: interaction.color,
+    opacity: 1,
+    z_index: 0,
   };
   return { shapeId: null, text: interaction.draft, properties };
 }

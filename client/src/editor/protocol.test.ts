@@ -10,6 +10,20 @@ const shape = { id: "00000000-0000-4000-8000-000000000004", kind: "rectangle", p
 test("parses the actual snapshot shape and connection payload", () => {
   const parsed = parseServerEvent(JSON.stringify({ type: "snapshot", canvas: { id: canvas, title: "Sketch", created_by: user, revision: 1, created_at: "now", updated_at: "now" }, canvas_revision: 1, shapes: [shape], connection_id: connection, connections: [{ connection_id: connection, user: { id: user, username: "alice" }, cursor: null }] }));
   assert.equal(parsed.type, "snapshot");
+  if (parsed.type === "snapshot") {
+    assert.equal(parsed.shapes[0].properties.opacity, 1);
+    assert.equal(parsed.shapes[0].properties.z_index, 0);
+  }
+});
+
+test("parses saved opacity and layer order and rejects invalid opacity", () => {
+  const parsed = parseServerEvent(JSON.stringify({ type: "operation.applied", operation_id: "00000000-0000-4000-8000-000000000005", actor_id: user, kind: "update", target_operation_id: null, canvas_revision: 2, shape: { ...shape, properties: { ...shape.properties, opacity: 0.35, z_index: 8 } } }));
+  assert.equal(parsed.type, "operation.applied");
+  if (parsed.type === "operation.applied") {
+    assert.equal(parsed.shape.properties.opacity, 0.35);
+    assert.equal(parsed.shape.properties.z_index, 8);
+  }
+  assert.throws(() => parseServerEvent(JSON.stringify({ type: "operation.applied", operation_id: "00000000-0000-4000-8000-000000000005", actor_id: user, kind: "update", target_operation_id: null, canvas_revision: 2, shape: { ...shape, properties: { ...shape.properties, opacity: 1.5 } } })));
 });
 
 test("accepts server errors with an authoritative conflict shape", () => {

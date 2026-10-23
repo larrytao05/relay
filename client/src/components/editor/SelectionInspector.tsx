@@ -16,26 +16,38 @@ export default function SelectionInspector({
   shapes,
   defaultColor,
   disabled,
+  canBringToFront,
+  canSendToBack,
   onColor,
+  onOpacity,
+  onBringToFront,
+  onSendToBack,
   onDelete,
 }: {
   selected: Shape | null;
   shapes: Shape[];
   defaultColor: string;
   disabled: boolean;
+  canBringToFront: boolean;
+  canSendToBack: boolean;
   onColor(color: string): void;
+  onOpacity(opacity: number): void;
+  onBringToFront(): void;
+  onSendToBack(): void;
   onDelete(): void;
 }) {
   const color = selected?.properties.color ?? defaultColor;
   const [rgb, setRgb] = useState(() => colorToChannels(color));
+  const [opacityDraft, setOpacityDraft] = useState(selected?.properties.opacity ?? 1);
   const [colorError, setColorError] = useState<string | null>(null);
   const usedColors = [...new Set(shapes.map((shape) => shape.properties.color.toLowerCase()))];
   const presetColors = EDITOR_COLORS.filter((swatch) => !usedColors.includes(swatch.value));
 
   useEffect(() => {
     setRgb(colorToChannels(color));
+    setOpacityDraft(selected?.properties.opacity ?? 1);
     setColorError(null);
-  }, [color]);
+  }, [color, selected?.id, selected?.properties.opacity]);
 
   function applyColorCode(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -86,6 +98,21 @@ export default function SelectionInspector({
           </div>
           {colorError && <p className="editor-color-error" id="editor-rgb-error" role="alert">{colorError}</p>}
         </form>
+      </section>
+      <section className="inspector-section">
+        <h3>Opacity</h3>
+        {selected ? <form className="editor-opacity-control" onSubmit={(event) => { event.preventDefault(); onOpacity(opacityDraft); }}>
+          <div className="editor-opacity-label"><label htmlFor="editor-opacity">Opacity</label><span>{Math.round(opacityDraft * 100)}%</span></div>
+          <input id="editor-opacity" type="range" min="0" max="100" step="1" value={Math.round(opacityDraft * 100)} disabled={disabled} onChange={(event) => setOpacityDraft(Number(event.target.value) / 100)} />
+          <button type="submit" disabled={disabled || opacityDraft === selected.properties.opacity}>Apply opacity</button>
+        </form> : <p className="inspector-empty">Select an object to change its opacity.</p>}
+      </section>
+      <section className="inspector-section">
+        <h3>Arrange</h3>
+        <div className="editor-arrange-actions">
+          <button type="button" disabled={disabled || !selected || !canBringToFront} onClick={onBringToFront}>Bring to front</button>
+          <button type="button" disabled={disabled || !selected || !canSendToBack} onClick={onSendToBack}>Send to back</button>
+        </div>
       </section>
       {selected && <section className="inspector-section">
         <button className="editor-delete-button" type="button" disabled={disabled} onClick={onDelete}>

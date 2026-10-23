@@ -11,11 +11,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 _COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
+_APPEARANCE_PROPERTIES = frozenset({"opacity", "z_index"})
 _KIND_PROPERTIES: dict[str, frozenset[str]] = {
-    "rectangle": frozenset({"x", "y", "width", "height", "color"}),
-    "ellipse": frozenset({"x", "y", "width", "height", "color"}),
-    "line": frozenset({"x1", "y1", "x2", "y2", "color"}),
-    "text": frozenset({"x", "y", "width", "height", "text", "font_size", "color"}),
+    "rectangle": frozenset({"x", "y", "width", "height", "color"}) | _APPEARANCE_PROPERTIES,
+    "ellipse": frozenset({"x", "y", "width", "height", "color"}) | _APPEARANCE_PROPERTIES,
+    "line": frozenset({"x1", "y1", "x2", "y2", "color"}) | _APPEARANCE_PROPERTIES,
+    "text": frozenset({"x", "y", "width", "height", "text", "font_size", "color"}) | _APPEARANCE_PROPERTIES,
 }
 
 
@@ -127,16 +128,17 @@ def _validate_shape_properties(kind: str, properties: object) -> dict[str, objec
         raise ValueError("Unsupported shape kind.")
     if not isinstance(properties, dict):
         raise TypeError("Shape properties must be an object.")
-    required = _KIND_PROPERTIES[kind]
+    allowed = _KIND_PROPERTIES[kind]
+    required = allowed - _APPEARANCE_PROPERTIES
     keys = set(properties)
     missing = required - keys
-    unexpected = keys - required
+    unexpected = keys - allowed
     if missing:
         raise ValueError("Shape properties are missing required fields.")
     if unexpected:
         raise ValueError("Shape properties contain unsupported fields.")
 
-    result = dict(properties)
+    result = {"opacity": 1, "z_index": 0, **properties}
     coordinate_keys = {"x", "y", "x1", "y1", "x2", "y2"}
     for key in coordinate_keys & required:
         result[key] = _finite_number(result[key], "Coordinates")
@@ -148,6 +150,11 @@ def _validate_shape_properties(kind: str, properties: object) -> dict[str, objec
     color = result["color"]
     if not isinstance(color, str) or _COLOR.fullmatch(color) is None:
         raise ValueError("Color must use #RRGGBB format.")
+    opacity = _finite_number(result["opacity"], "Opacity")
+    if not 0 <= opacity <= 1:
+        raise ValueError("Opacity must be between 0 and 1.")
+    result["opacity"] = opacity
+    result["z_index"] = _finite_number(result["z_index"], "Layer order")
     if kind == "text":
         text = result["text"]
         if not isinstance(text, str):
