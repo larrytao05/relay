@@ -7,3 +7,5 @@ __pycache__/
 *.pyc
 .venv/
 *.egg-info/
+*.html
+EDITOR_DESIGN.md

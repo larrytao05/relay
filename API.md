@@ -1,6 +1,6 @@
 # Whiteboard API contract
 
-This is the proposed implementation contract. Only `GET /health` exists today.
+This is the API contract. `GET /health`, the authentication endpoints, and the canvas endpoints below are implemented; the collaborative WebSocket remains planned.
 Use HTTP for accounts and canvas membership, and one WebSocket per open canvas for edits and presence.
 
 ## HTTP endpoints
@@ -18,14 +18,16 @@ Public user objects contain `id` and `username`. Password hashes and session tok
 | GET | `/api/canvases` | None | `200 {canvases: [...]}` containing only canvases the user belongs to. |
 | POST | `/api/canvases` | `{title}` | `201 {canvas}`. Create the canvas and its creator's membership in one transaction. |
 | GET | `/api/canvases/{canvas_id}` | None | `200 {canvas, members}` for a member. Shapes arrive in the WebSocket snapshot. |
-| POST | `/api/canvases/{canvas_id}/members` | `{username}` | `200 {user}`. Add an existing account by exact normalized username. Repeated invitations have the same result. |
+| POST | `/api/canvases/{canvas_id}/members` | `{username}` | `200 {user}`. Immediately add an existing account by normalized username. Repeated requests have the same result. |
+
+The member endpoint grants access immediately for this simple version. A future pending-invitation flow can add an invitation inbox and accept/decline endpoints; recipients do not need to accept membership in the current version.
 
 Canvas objects contain `id`, `title`, `created_by`, `revision`, `created_at`, and `updated_at`.
 Normalize usernames with whitespace trimming and lowercase conversion. Accept 3-32 ASCII letters, digits, underscores, or hyphens.
 Passwords contain 8-128 characters and are not trimmed. Trim titles and require 1-120 characters.
 
-Use an opaque random `session` cookie with `HttpOnly`, `SameSite=Lax`, and `Path=/`; add `Secure` when served over HTTPS.
-Store only its digest in `auth_session`. The HTTP client sends credentials with requests.
+Use an opaque random `session` cookie with `HttpOnly`, `SameSite=Lax`, and `Path=/`; set `SESSION_COOKIE_SECURE=true` when serving over HTTPS so the cookie receives the `Secure` flag. Store only its SHA-256 digest in `auth_session`; sessions expire after 14 days.
+The HTTP client sends credentials with requests.
 Allow only the configured frontend origins for credentialed CORS and WebSocket handshakes.
 Require an allowed origin on state-changing browser requests. Authentication and membership also apply to every canvas command.
 
