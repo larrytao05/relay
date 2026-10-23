@@ -1,4 +1,4 @@
--- This file initializes fresh Postgres volumes; apply it manually to an existing database.
+-- Docker Compose reapplies this idempotent base schema on startup.
 BEGIN;
 
 CREATE TABLE IF NOT EXISTS app_user (
@@ -63,6 +63,8 @@ CREATE TABLE IF NOT EXISTS canvas_operation (
     kind text NOT NULL,
     before_patch jsonb NOT NULL DEFAULT '{}'::jsonb,
     after_patch jsonb NOT NULL DEFAULT '{}'::jsonb,
+    request jsonb,
+    result jsonb,
     target_operation_id uuid,
     created_at timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT canvas_operation_shape_canvas_fkey
@@ -77,6 +79,14 @@ CREATE TABLE IF NOT EXISTS canvas_operation (
         CHECK (jsonb_typeof(before_patch) = 'object'),
     CONSTRAINT canvas_operation_after_patch_object_check
         CHECK (jsonb_typeof(after_patch) = 'object'),
+    CONSTRAINT canvas_operation_request_result_pair_check CHECK (
+        (request IS NULL AND result IS NULL)
+        OR (
+            request IS NOT NULL AND result IS NOT NULL
+            AND jsonb_typeof(request) = 'object'
+            AND jsonb_typeof(result) = 'object'
+        )
+    ),
     CONSTRAINT canvas_operation_canvas_revision_key UNIQUE (canvas_id, canvas_revision),
     CONSTRAINT canvas_operation_id_canvas_id_key UNIQUE (id, canvas_id)
 );
