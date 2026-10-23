@@ -1,6 +1,6 @@
 # Whiteboard API contract
 
-This is the API contract. `GET /health`, the authentication endpoints, and the canvas endpoints below are implemented; the collaborative WebSocket remains planned.
+This is the API contract. `GET /health`, authentication, canvas management, and authenticated WebSocket snapshots are implemented. Shape commands, undo/redo, and presence/cursor broadcasts remain planned.
 Use HTTP for accounts and canvas membership, and one WebSocket per open canvas for edits and presence.
 
 ## HTTP endpoints
@@ -40,8 +40,11 @@ Connect to `/ws/canvases/{canvas_id}` using the same cookie. Authenticate and ch
 The existing Vite `/ws` proxy supports this path.
 
 The first server message is a `snapshot` containing the canvas, its `canvas_revision`, all visible shapes, current presence, and this connection's `connection_id`.
+The snapshot's `connections` list includes each active connection, including this tab, with `connection_id`, public `user`, and `cursor`. Cursor positions remain null until cursor handling is implemented.
 Subscribe and load the snapshot under the same canvas queue used for edits so that an update cannot disappear between those steps.
 Reconnect by obtaining a fresh snapshot.
+
+WS-03 currently returns `invalid_message` for invalid frames and `feature_not_available` for valid commands in the table below. The remaining tickets add those commands. Origin configuration and the single-worker deployment requirement are documented in [WEBSOCKET_CONNECTIONS.md](server/WEBSOCKET_CONNECTIONS.md).
 
 | Client message | Fields besides `type` | Effect |
 | --- | --- | --- |
