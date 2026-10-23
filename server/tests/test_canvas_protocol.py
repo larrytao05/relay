@@ -2,7 +2,7 @@ import json
 import unittest
 from uuid import UUID
 
-from app.canvas_ws import (
+from app.canvas_protocol import (
     InvalidMessage,
     _merge_shape_patch,
     _parse_client_message,

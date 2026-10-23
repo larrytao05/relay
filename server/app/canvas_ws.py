@@ -1,55 +1,33 @@
-"""Pure validation for client messages on the canvas WebSocket."""
+"""Room lifecycle and durable canvas command orchestration."""
 
 import asyncio
 import json
 import logging
-import math
 import os
-import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
 import asyncpg
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.auth import PublicUser, hash_session_token
+from app.canvas_history import Navigation, apply_history_command
+from app.canvas_protocol import (
+    InvalidMessage,
+    _CreateCommand,
+    _CursorCommand,
+    _DeleteCommand,
+    _merge_shape_patch,
+    _parse_client_message,
+    _RedoCommand,
+    _UndoCommand,
+    _UpdateCommand,
+)
 from app.db import get_pool
 
 logger = logging.getLogger(__name__)
-
-_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
-_KIND_PROPERTIES: dict[str, frozenset[str]] = {
-    "rectangle": frozenset({"x", "y", "width", "height", "color"}),
-    "ellipse": frozenset({"x", "y", "width", "height", "color"}),
-    "line": frozenset({"x1", "y1", "x2", "y2", "color"}),
-    "text": frozenset({"x", "y", "width", "height", "text", "font_size", "color"}),
-}
-_ALL_PROPERTIES = frozenset().union(*_KIND_PROPERTIES.values())
-
-
-class InvalidMessage(Exception):
-    """A client message failed JSON, command, or shape validation."""
-
-    code = "invalid_message"
-
-    def __init__(self, message: str, operation_id: UUID | None = None) -> None:
-        super().__init__(message)
-        self.message = message
-        self.operation_id = operation_id
-
-    def to_message(self) -> dict[str, object]:
-        result: dict[str, object] = {
-            "type": "error",
-            "code": self.code,
-            "message": self.message,
-        }
-        if self.operation_id is not None:
-            result["operation_id"] = str(self.operation_id)
-        return result
 
 
 class _ShapeIdConflict(Exception):
@@ -69,194 +47,6 @@ def _json_value(value: object) -> object:
     if isinstance(value, str):
         return json.loads(value)
     return value
-
-
-class _Command(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    type: str
-
-
-class _CreateCommand(_Command):
-    type: Literal["shape.create"]
-    operation_id: UUID
-    shape_id: UUID
-    kind: Literal["rectangle", "ellipse", "line", "text"]
-    properties: dict[str, object]
-
-
-class _UpdateCommand(_Command):
-    type: Literal["shape.update"]
-    operation_id: UUID
-    shape_id: UUID
-    expected_revision: Annotated[int, Field(gt=0, strict=True)]
-    patch: dict[str, object]
-
-
-class _DeleteCommand(_Command):
-    type: Literal["shape.delete"]
-    operation_id: UUID
-    shape_id: UUID
-    expected_revision: Annotated[int, Field(gt=0, strict=True)]
-
-
-class _UndoCommand(_Command):
-    type: Literal["undo"]
-    operation_id: UUID
-    target_operation_id: UUID
-
-
-class _RedoCommand(_Command):
-    type: Literal["redo"]
-    operation_id: UUID
-    target_operation_id: UUID
-
-
-class _Point(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    x: float
-    y: float
-
-    @field_validator("x", "y", mode="before")
-    @classmethod
-    def finite_number(cls, value: object) -> float:
-        return _finite_number(value, "coordinates")
-
-
-class _CursorCommand(_Command):
-    type: Literal["cursor"]
-    position: _Point | None
-
-
-_COMMAND_MODELS = {
-    "shape.create": _CreateCommand,
-    "shape.update": _UpdateCommand,
-    "shape.delete": _DeleteCommand,
-    "undo": _UndoCommand,
-    "redo": _RedoCommand,
-    "cursor": _CursorCommand,
-}
-
-
-def _finite_number(value: object, label: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TypeError(f"{label} must be a number.")
-    try:
-        number = float(value)
-    except OverflowError as exc:
-        raise ValueError(f"{label} must be finite.") from exc
-    if not math.isfinite(number):
-        raise ValueError(f"{label} must be finite.")
-    return number
-
-
-def _validate_shape_properties(kind: str, properties: object) -> dict[str, object]:
-    """Validate and return a complete shape property object for its kind."""
-    if kind not in _KIND_PROPERTIES:
-        raise ValueError("Unsupported shape kind.")
-    if not isinstance(properties, dict):
-        raise TypeError("Shape properties must be an object.")
-    required = _KIND_PROPERTIES[kind]
-    keys = set(properties)
-    missing = required - keys
-    unexpected = keys - required
-    if missing:
-        raise ValueError("Shape properties are missing required fields.")
-    if unexpected:
-        raise ValueError("Shape properties contain unsupported fields.")
-
-    result = dict(properties)
-    coordinate_keys = {"x", "y", "x1", "y1", "x2", "y2"}
-    for key in coordinate_keys & required:
-        result[key] = _finite_number(result[key], "Coordinates")
-    for key in {"width", "height", "font_size"} & required:
-        number = _finite_number(result[key], "Dimensions and font size")
-        if number <= 0:
-            raise ValueError("Dimensions and font size must be positive.")
-        result[key] = number
-    color = result["color"]
-    if not isinstance(color, str) or _COLOR.fullmatch(color) is None:
-        raise ValueError("Color must use #RRGGBB format.")
-    if kind == "text":
-        text = result["text"]
-        if not isinstance(text, str):
-            raise ValueError("Text must be a string.")
-        if len(text) > 10_000:
-            raise ValueError("Text must be at most 10000 characters.")
-    return result
-
-
-def _merge_shape_patch(
-    kind: str, properties: dict[str, object], patch: dict[str, object]
-) -> dict[str, object]:
-    """Apply a nonempty patch and validate the resulting complete shape."""
-    if kind not in _KIND_PROPERTIES:
-        raise ValueError("Unsupported shape kind.")
-    if not isinstance(properties, dict) or not isinstance(patch, dict):
-        raise TypeError("Shape properties and patch must be objects.")
-    if not patch:
-        raise ValueError("Update patch must not be empty.")
-    if set(patch) - _KIND_PROPERTIES[kind]:
-        raise ValueError(
-            "Update patch contains properties unsupported for this shape kind."
-        )
-    current = _validate_shape_properties(kind, properties)
-    current.update(patch)
-    return _validate_shape_properties(kind, current)
-
-
-def _safe_operation_id(value: object) -> UUID | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        return UUID(value)
-    except (ValueError, AttributeError):
-        return None
-
-
-def _parse_client_message(message: str | bytes | object) -> _Command:
-    """Parse an untrusted WebSocket frame into a private typed command."""
-    payload: object = message
-    if isinstance(message, bytes):
-        try:
-            message = message.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise InvalidMessage("Message must be valid UTF-8.") from exc
-    if isinstance(message, str):
-        try:
-            payload = json.loads(message)
-        except (ValueError, TypeError) as exc:
-            raise InvalidMessage("Message must contain valid JSON.") from exc
-
-    operation_id = (
-        _safe_operation_id(payload.get("operation_id"))
-        if isinstance(payload, dict)
-        else None
-    )
-    try:
-        if not isinstance(payload, dict):
-            raise TypeError("Message must be a JSON object.")
-        message_type = payload.get("type")
-        model = (
-            _COMMAND_MODELS.get(message_type) if isinstance(message_type, str) else None
-        )
-        if model is None:
-            raise ValueError("Unsupported message type.")
-        command = model.model_validate(payload)
-        if isinstance(command, _CreateCommand):
-            command.properties = _validate_shape_properties(
-                command.kind, command.properties
-            )
-        elif isinstance(command, _UpdateCommand):
-            if not command.patch:
-                raise ValueError("Update patch must not be empty.")
-            if set(command.patch) - _ALL_PROPERTIES:
-                raise ValueError("Update patch contains unsupported properties.")
-        return command
-    except (ValidationError, ValueError, TypeError) as exc:
-        detail = str(exc)
-        if isinstance(exc, ValidationError):
-            detail = "Message fields are invalid."
-        raise InvalidMessage(detail, operation_id) from exc
 
 
 _DEFAULT_ALLOWED_ORIGINS = frozenset({"http://localhost:5173", "http://127.0.0.1:5173"})
@@ -287,6 +77,7 @@ class Connection:
     socket: WebSocket
     outbound: asyncio.Queue[dict[str, object]]
     cursor: dict[str, float] | None = None
+    history: Navigation = field(default_factory=Navigation)
     sender_task: asyncio.Task[None] | None = None
     detached: bool = False
 
@@ -296,6 +87,7 @@ class Room:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     connections: dict[UUID, Connection] = field(default_factory=dict)
     leases: int = 0
+    operation_origins: dict[UUID, UUID] = field(default_factory=dict)
 
 
 class CanvasRooms:
@@ -591,6 +383,37 @@ class CanvasRooms:
                             connection, command
                         )
                         if applied:
+                            connection.history.record_edit(command.operation_id)
+                            room.operation_origins[command.operation_id] = connection.id
+                            slow = [
+                                peer
+                                for peer in list(room.connections.values())
+                                if not self._enqueue_locked(room, peer, message)
+                            ]
+                        else:
+                            slow = (
+                                [connection]
+                                if not self._enqueue_locked(room, connection, message)
+                                else []
+                            )
+                    for peer in slow:
+                        await self._close_slow_connection(peer)
+                    continue
+                if isinstance(command, (_UndoCommand, _RedoCommand)):
+                    async with room.lock:
+                        message, applied = await self._apply_history_command(
+                            connection, room, command
+                        )
+                        if applied:
+                            if isinstance(command, _UndoCommand):
+                                connection.history.record_undo(
+                                    command.target_operation_id, command.operation_id
+                                )
+                            else:
+                                connection.history.record_redo(
+                                    command.target_operation_id, command.operation_id
+                                )
+                            room.operation_origins[command.operation_id] = connection.id
                             slow = [
                                 peer
                                 for peer in list(room.connections.values())
@@ -822,6 +645,28 @@ class CanvasRooms:
                 "operation_failed",
                 "Operation could not be saved.",
             ), False
+
+    async def _apply_history_command(
+        self,
+        connection: Connection,
+        room: Room,
+        command: _UndoCommand | _RedoCommand,
+    ) -> tuple[dict[str, object], bool]:
+        pool = await self._db_pool()
+
+        async def collision(operation_id, request):
+            return await self._operation_collision(
+                pool, connection, operation_id, request
+            )
+
+        return await apply_history_command(
+            pool=pool,
+            connection=connection,
+            room=room,
+            command=command,
+            replay=self._operation_replay,
+            collision=collision,
+        )
 
     async def _operation_replay(
         self,

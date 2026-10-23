@@ -23,7 +23,7 @@ Room locks and connection state live in process memory. Multiple workers would h
 
 Shutdown cancels and awaits in-flight connection handlers and senders. Socket-close attempts run independently and time out after one second so a blocked transport cannot stall other peers. A cancelled handshake releases its room lease.
 
-The endpoint authenticates, sends snapshots, and accepts `shape.create`, `shape.update`, `shape.delete`, and `cursor`. Presence joins and leaves identify each tab independently. Invalid messages receive `invalid_message`; undo and redo receive `feature_not_available` until their tickets are implemented.
+The endpoint authenticates, sends snapshots, and accepts `shape.create`, `shape.update`, `shape.delete`, and `cursor`. Presence joins and leaves identify each tab independently. Invalid messages receive `invalid_message`. Undo and redo persist inverse operations and protect later collaborator edits; navigation resets on reconnect.
 
 Run the backend tests from `server` with the test database configured:
 

@@ -1,6 +1,6 @@
 # Whiteboard API contract
 
-This is the API contract. `GET /health`, authentication, canvas management, authenticated WebSocket snapshots, and shape creation, updates, and soft deletes are implemented. Presence and cursor broadcasts are implemented. Undo/redo remains planned.
+This is the API contract. `GET /health`, authentication, canvas management, authenticated WebSocket snapshots, and shape creation, updates, and soft deletes are implemented. Presence, cursor broadcasts, and connection-scoped undo/redo are implemented. Live session revocation remains planned.
 Use HTTP for accounts and canvas membership, and one WebSocket per open canvas for edits and presence.
 
 ## HTTP endpoints
@@ -44,7 +44,7 @@ The snapshot's `connections` list includes each active connection, including thi
 Subscribe and load the snapshot under the same canvas queue used for edits so that an update cannot disappear between those steps.
 Reconnect by obtaining a fresh snapshot.
 
-Invalid frames return `invalid_message`. `shape.create`, `shape.update`, and `shape.delete` persist and broadcast accepted operations; exact retries return the saved acknowledgement only to the requester. Undo and redo commands currently return `feature_not_available` until their tickets are implemented. Origin configuration and the single-worker deployment requirement are documented in [WEBSOCKET_CONNECTIONS.md](server/WEBSOCKET_CONNECTIONS.md).
+Invalid frames return `invalid_message`. `shape.create`, `shape.update`, and `shape.delete` persist and broadcast accepted operations; exact retries return the saved acknowledgement only to the requester. Undo and redo use server-recorded inverse data and connection-local navigation. Origin configuration and the single-worker deployment requirement are documented in [WEBSOCKET_CONNECTIONS.md](server/WEBSOCKET_CONNECTIONS.md).
 
 | Client message | Fields besides `type` | Effect |
 | --- | --- | --- |

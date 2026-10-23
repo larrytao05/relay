@@ -2,7 +2,7 @@
 
 These tickets implement the backend design in [WEBSOCKET_DESIGN.md](WEBSOCKET_DESIGN.md) and the messages in [API.md](../API.md). Accounts and canvas management already exist. Frontend drawing interactions and socket wiring are separate work.
 
-WS-01 through WS-06 are implemented. Tests cover protocol validation, replay storage, database upgrades, authenticated snapshots, connection cleanup, durable shape creation, updates, soft deletes, and conflicts. Independent reviews are recorded in [reviews/ws01-ws02/summary.md](reviews/ws01-ws02/summary.md), [reviews/ws03/summary.md](reviews/ws03/summary.md), and [reviews/ws04/summary.md](reviews/ws04/summary.md). WS-07 and WS-08 remain unimplemented. Further review is deferred until all remaining tickets are implemented.
+WS-01 through WS-07 are implemented. Tests cover protocol validation, replay storage, database upgrades, authenticated snapshots, connection cleanup, durable shape creation, updates, soft deletes, and conflicts. Independent reviews are recorded in [reviews/ws01-ws02/summary.md](reviews/ws01-ws02/summary.md), [reviews/ws03/summary.md](reviews/ws03/summary.md), and [reviews/ws04/summary.md](reviews/ws04/summary.md). WS-08 remains unimplemented. Further review is deferred until all remaining tickets are implemented.
 
 ## Build order
 
@@ -46,7 +46,7 @@ Run database tests with `TEST_DATABASE_URL` pointing at a separate database init
 
 **Goal.** Convert untrusted JSON into typed commands with one stable contract.
 
-**Scope.** Add private command models and parsing helpers in `app/canvas_ws.py`. Handle `shape.create`, `shape.update`, `shape.delete`, `undo`, `redo`, and `cursor`. Match the field names in `API.md`. Parse UUIDs, require positive expected revisions, reject unsupported message types and unknown fields, and reject malformed JSON. Actor, session, and canvas identity come from the connection.
+**Scope.** Add private command models and parsing helpers in `app/canvas_protocol.py`. Handle `shape.create`, `shape.update`, `shape.delete`, `undo`, `redo`, and `cursor`. Match the field names in `API.md`. Parse UUIDs, require positive expected revisions, reject unsupported message types and unknown fields, and reject malformed JSON. Actor, session, and canvas identity come from the connection.
 
 Use these shape properties:
 
@@ -200,3 +200,4 @@ For each ticket, record the new tests, their expected initial failure, the final
 | WS-04 | Create commands returned `feature_not_available` in the new socket tests. | 7 create tests; 32 backend tests with PostgreSQL enabled. | Approved by an independent Luna reviewer. |
 | WS-05 | Update/delete commands returned `feature_not_available`; concurrent edits produced zero accepted operations. | 5 edit tests; 37 backend tests with PostgreSQL enabled; Ruff and formatting passed. | Deferred until all tickets are implemented. |
 | WS-06 | Presence tests timed out waiting for the missing `presence.joined` event. | 28 isolated tests; 40 tests after integration with WS-05, PostgreSQL enabled; Ruff and formatting passed. | Deferred until all tickets are implemented. |
+| WS-07 | Undo/redo returned `feature_not_available` in six new socket test methods. | 7 focused history tests; 47 integrated backend tests with PostgreSQL enabled; Ruff and formatting passed. | Deferred until all tickets are implemented. |

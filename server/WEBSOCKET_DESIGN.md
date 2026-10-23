@@ -101,7 +101,7 @@ An actor task and mailbox per canvas. This gives each canvas one writer, but add
 
 ## Implementation reconciliation
 
-WS-01 implements private command models, parsing, shape validation, and patch merging in `canvas_ws.py`. WS-02 implements replay columns and the rerunnable migration. WS-03 registers the canvas socket and implements authenticated snapshots, room leases, bounded outbound queues, and shutdown. The application lifespan owns one `CanvasRooms` instance. A public `serve` wrapper tracks connection handlers so shutdown also cleans up in-flight handshakes; private helpers retain protocol and room behavior in the same module. Independent Luna reviews found oversized-number parsing and handshake/shutdown cleanup errors; regression tests and boundary fixes resolve them. WS-04 implements transactional shape creation, exact retry acknowledgements, and ordered committed broadcasts; its independent review approved without confirmed bugs. WS-05 adds updates, soft deletes, and whole-shape revision conflicts through the shared transaction path. WS-06 adds tab-scoped presence joins/leaves and transient cursors through room queues. History and session revocation remain future work.
+WS-01 implements private command models, parsing, shape validation, and patch merging in `canvas_protocol.py`. WS-02 implements replay columns and the rerunnable migration. WS-03 registers the canvas socket and implements authenticated snapshots, room leases, bounded outbound queues, and shutdown. The application lifespan owns one `CanvasRooms` instance. A public `serve` wrapper tracks connection handlers so shutdown also cleans up in-flight handshakes; private helpers keep room behavior in `canvas_ws.py`, while pure validation lives in `canvas_protocol.py`. Independent Luna reviews found oversized-number parsing and handshake/shutdown cleanup errors; regression tests and boundary fixes resolve them. WS-04 implements transactional shape creation, exact retry acknowledgements, and ordered committed broadcasts; its independent review approved without confirmed bugs. WS-05 adds updates, soft deletes, and whole-shape revision conflicts through the shared transaction path. WS-06 adds tab-scoped presence joins/leaves and transient cursors through room queues. WS-07 adds connection-local navigation and transactional inverses in `canvas_history.py`. Room state records operation origins so another tab of the same user counts as a collaborator. Live session revocation remains future work.
 
 ## Open questions and risks
 
@@ -110,4 +110,4 @@ WS-01 implements private command models, parsing, shape validation, and patch me
 
 ## Next implementation step
 
-Complete WS-07's connection-scoped history, then WS-08's session revocation.
+Implement WS-08's session revocation and idle expiry, then run the deferred independent review.
