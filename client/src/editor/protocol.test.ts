@@ -1,0 +1,84 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { parseServerEvent } from "./protocol.ts";
+
+const user = "00000000-0000-4000-8000-000000000001";
+const connection = "00000000-0000-4000-8000-000000000002";
+const canvas = "00000000-0000-4000-8000-000000000003";
+const shape = { id: "00000000-0000-4000-8000-000000000004", kind: "rectangle", properties: { x: 2, y: 3, width: 40, height: 20, color: "#abcdef" }, revision: 1, deleted: false };
+
+test("parses the actual snapshot shape and connection payload", () => {
+  const parsed = parseServerEvent(JSON.stringify({ type: "snapshot", canvas: { id: canvas, title: "Sketch", created_by: user, revision: 1, created_at: "now", updated_at: "now" }, canvas_revision: 1, shapes: [shape], connection_id: connection, connections: [{ connection_id: connection, user: { id: user, username: "alice" }, cursor: null }] }));
+  assert.equal(parsed.type, "snapshot");
+});
+
+test("accepts server errors with an authoritative conflict shape", () => {
+  const parsed = parseServerEvent(JSON.stringify({ type: "error", code: "conflict", message: "Changed by another editor.", operation_id: "00000000-0000-4000-8000-000000000005", shape: { ...shape, revision: 2 } }));
+  assert.equal(parsed.type, "error");
+});
+
+test("parses the committed acknowledgement emitted by WS-04", () => {
+  const parsed = parseServerEvent(JSON.stringify({
+    type: "operation.applied",
+    operation_id: "00000000-0000-4000-8000-000000000005",
+    actor_id: user,
+    kind: "create",
+    target_operation_id: null,
+    canvas_revision: 2,
+    shape,
+  }));
+  assert.equal(parsed.type, "operation.applied");
+  if (parsed.type === "operation.applied") {
+    assert.equal(parsed.canvas_revision, 2);
+    assert.equal(parsed.target_operation_id, null);
+    assert.equal(parsed.shape.id, shape.id);
+  }
+});
+
+test("parses the WS-05 update and delete acknowledgement envelope", () => {
+  for (const [kind, revision, deleted] of [["update", 2, false], ["delete", 3, true]] as const) {
+    const parsed = parseServerEvent(JSON.stringify({
+      type: "operation.applied",
+      operation_id: "00000000-0000-4000-8000-000000000005",
+      actor_id: user,
+      kind,
+      target_operation_id: null,
+      canvas_revision: revision,
+      shape: { ...shape, revision, deleted },
+    }));
+    assert.equal(parsed.type, "operation.applied");
+    if (parsed.type === "operation.applied") {
+      assert.equal(parsed.kind, kind);
+      assert.equal(parsed.shape.deleted, deleted);
+    }
+  }
+});
+
+test("parses WS-06 presence and cursor messages including cursor hiding", () => {
+  const joined = parseServerEvent(JSON.stringify({ type: "presence.joined", connection_id: connection, user: { id: user, username: "alice" } }));
+  assert.equal(joined.type, "presence.joined");
+  if (joined.type === "presence.joined") {
+    assert.equal(joined.connection.connection_id, connection);
+    assert.equal(joined.connection.user.username, "alice");
+    assert.equal(joined.connection.cursor, null);
+  }
+
+  const moved = parseServerEvent(JSON.stringify({ type: "cursor", connection_id: connection, user_id: user, position: { x: 14, y: 28 } }));
+  const hidden = parseServerEvent(JSON.stringify({ type: "cursor", connection_id: connection, user_id: user, position: null }));
+  const left = parseServerEvent(JSON.stringify({ type: "presence.left", connection_id: connection }));
+  assert.equal(moved.type, "cursor");
+  assert.equal(hidden.type, "cursor");
+  if (hidden.type === "cursor") assert.equal(hidden.position, null);
+  assert.deepEqual(left, { type: "presence.left", connection_id: connection });
+});
+
+test("rejects malformed shape records and unsupported message names", () => {
+  assert.throws(() => parseServerEvent(JSON.stringify({ type: "snapshot", canvas: {}, canvas_revision: 0, shapes: [{ ...shape, properties: { ...shape.properties, width: 0 } }], connection_id: connection, connections: [] })));
+  assert.throws(() => parseServerEvent(JSON.stringify({ type: "peers", peers: [] })));
+});
+
+test("rejects inconsistent snapshots and incomplete applied events", () => {
+  assert.throws(() => parseServerEvent(JSON.stringify({ type: "snapshot", canvas: { id: canvas, title: "Sketch", created_by: user, revision: 1, created_at: "now", updated_at: "now" }, canvas_revision: 2, shapes: [], connection_id: connection, connections: [{ connection_id: connection, user: { id: user, username: "alice" }, cursor: null }] })));
+  assert.throws(() => parseServerEvent(JSON.stringify({ type: "operation.applied", operation_id: "00000000-0000-4000-8000-000000000005", actor_id: user, kind: "made-up", canvas_revision: 2, target_operation_id: null, shape })));
+  assert.throws(() => parseServerEvent(JSON.stringify({ type: "operation.applied", operation_id: "00000000-0000-4000-8000-000000000005", actor_id: user, kind: "create", canvas_revision: 2, shape })));
+});
