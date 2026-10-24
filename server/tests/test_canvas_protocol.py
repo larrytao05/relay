@@ -82,14 +82,39 @@ class CanvasProtocolTests(unittest.TestCase):
     def test_validates_opacity_and_layer_order(self):
         base = {"x": 1, "y": 2, "width": 3, "height": 4, "color": "#ffffff"}
         self.assertEqual(
-            _validate_shape_properties("rectangle", {**base, "opacity": 0.4, "z_index": 7}),
+            _validate_shape_properties(
+                "rectangle", {**base, "opacity": 0.4, "z_index": 7}
+            ),
             {**base, "opacity": 0.4, "z_index": 7},
         )
         for opacity in (-0.01, 1.01, True):
-            with self.subTest(opacity=opacity), self.assertRaises((TypeError, ValueError)):
+            with (
+                self.subTest(opacity=opacity),
+                self.assertRaises((TypeError, ValueError)),
+            ):
                 _validate_shape_properties("rectangle", {**base, "opacity": opacity})
         with self.assertRaises((TypeError, ValueError)):
             _validate_shape_properties("rectangle", {**base, "z_index": float("inf")})
+
+    def test_text_limit_counts_ascii_bmp_and_astral_code_points(self):
+        base = {
+            "x": 1,
+            "y": 2,
+            "width": 3,
+            "height": 4,
+            "font_size": 12,
+            "color": "#ffffff",
+        }
+        for character in ("a", "é", "🧪"):
+            with self.subTest(character=character):
+                accepted = _validate_shape_properties(
+                    "text", {**base, "text": character * 10_000}
+                )
+                self.assertEqual(accepted["text"], character * 10_000)
+                with self.assertRaises(ValueError):
+                    _validate_shape_properties(
+                        "text", {**base, "text": character * 10_001}
+                    )
 
     def test_parses_other_commands_and_cursor_hiding(self):
         operation_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -225,7 +250,15 @@ class CanvasProtocolTests(unittest.TestCase):
         merged = _merge_shape_patch("rectangle", old, {"x": 9})
         self.assertEqual(
             merged,
-            {"x": 9, "y": 7, "width": 20, "height": 30, "color": "#ffffff", "opacity": 1.0, "z_index": 0.0},
+            {
+                "x": 9,
+                "y": 7,
+                "width": 20,
+                "height": 30,
+                "color": "#ffffff",
+                "opacity": 1.0,
+                "z_index": 0.0,
+            },
         )
         with self.assertRaises(ValueError):
             _merge_shape_patch("rectangle", old, {"width": -1})

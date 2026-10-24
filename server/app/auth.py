@@ -8,7 +8,7 @@ from datetime import timedelta
 from typing import Annotated, Any
 from uuid import UUID
 
-from asyncpg import UniqueViolationError
+from asyncpg import LockNotAvailableError, UniqueViolationError
 from fastapi import APIRouter, Cookie, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, field_validator
 
@@ -23,6 +23,7 @@ SCRYPT_COST = 2**14
 SCRYPT_BLOCK_SIZE = 8
 SCRYPT_PARALLELISM = 1
 SCRYPT_KEY_LENGTH = 64
+_LOGOUT_LOCK_TIMEOUT = "5s"
 USERNAME_PATTERN = re.compile(r"^[a-z0-9_-]{3,32}$")
 
 
@@ -211,11 +212,21 @@ async def logout(
     if session_token:
         token_hash = hash_session_token(session_token)
         pool = await get_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM auth_session WHERE token_hash = $1",
-                token_hash,
-            )
+        try:
+            async with pool.acquire() as conn, conn.transaction():
+                await conn.fetchval(
+                    "SELECT set_config('lock_timeout', $1, true)",
+                    _LOGOUT_LOCK_TIMEOUT,
+                )
+                await conn.execute(
+                    "DELETE FROM auth_session WHERE token_hash = $1",
+                    token_hash,
+                )
+        except LockNotAvailableError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Logout could not be completed. Please try again.",
+            ) from exc
         rooms = getattr(request.app.state, "canvas_rooms", None)
         if rooms is not None:
             await rooms.revoke_session(token_hash)

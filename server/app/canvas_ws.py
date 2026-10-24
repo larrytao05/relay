@@ -13,6 +13,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 
 from app.auth import PublicUser, hash_session_token
+from app.canvas_access import lock_canvas_write_access
 from app.canvas_conflicts import can_merge_update
 from app.canvas_history import Navigation, apply_history_command
 from app.canvas_protocol import (
@@ -251,24 +252,46 @@ class CanvasRooms:
                 del self._rooms[canvas_id]
 
     async def _snapshot(
-        self, conn: object, canvas_id: UUID
+        self, conn: asyncpg.Connection, canvas_id: UUID, identity: SessionIdentity
     ) -> dict[str, object] | None:
-        canvas = await conn.fetchrow(
-            """
-            SELECT id, title, created_by, revision, created_at, updated_at
-            FROM canvas WHERE id = $1
-            """,
-            canvas_id,
-        )
-        if canvas is None:
-            return None
-        shape_rows = await conn.fetch(
-            """
-            SELECT id, kind, properties, revision, (deleted_at IS NOT NULL) AS deleted
-            FROM shape WHERE canvas_id = $1 AND deleted_at IS NULL ORDER BY id
-            """,
-            canvas_id,
-        )
+        async with conn.transaction(isolation="repeatable_read", readonly=True):
+            authorized = await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM auth_session
+                    JOIN canvas_member
+                      ON canvas_member.user_id = auth_session.user_id
+                    WHERE auth_session.token_hash = $1
+                      AND auth_session.user_id = $2
+                      AND auth_session.expires_at > now()
+                      AND canvas_member.canvas_id = $3
+                      AND $4::timestamptz > now()
+                )
+                """,
+                identity.token_hash,
+                identity.user.id,
+                canvas_id,
+                identity.expires_at,
+            )
+            if not authorized:
+                return None
+            canvas = await conn.fetchrow(
+                """
+                SELECT id, title, created_by, revision, created_at, updated_at
+                FROM canvas WHERE id = $1
+                """,
+                canvas_id,
+            )
+            if canvas is None:
+                return None
+            shape_rows = await conn.fetch(
+                """
+                SELECT id, kind, properties, revision, (deleted_at IS NOT NULL) AS deleted
+                FROM shape WHERE canvas_id = $1 AND deleted_at IS NULL ORDER BY id
+                """,
+                canvas_id,
+            )
         shapes = []
         for row in shape_rows:
             properties = row["properties"]
@@ -340,12 +363,9 @@ class CanvasRooms:
                 if self._closing:
                     close_code = 1001
                     return
-                if not await self._connection_access_valid(connection):
-                    close_code = 1008
-                    return
                 pool = await self._db_pool()
                 async with pool.acquire() as conn:
-                    snapshot = await self._snapshot(conn, canvas_id)
+                    snapshot = await self._snapshot(conn, canvas_id, identity)
                 if snapshot is None:
                     close_code = 1008
                     return
@@ -618,23 +638,13 @@ class CanvasRooms:
         try:
             async with pool.acquire() as conn:  # noqa: SIM117
                 async with conn.transaction():
-                    access = await conn.fetchrow(
-                        """
-                        SELECT canvas.revision
-                        FROM canvas
-                        JOIN canvas_member ON canvas_member.canvas_id = canvas.id
-                        JOIN auth_session ON auth_session.user_id = canvas_member.user_id
-                        WHERE canvas.id = $1
-                          AND canvas_member.user_id = $2
-                          AND auth_session.token_hash = $3
-                          AND auth_session.expires_at > now()
-                        FOR UPDATE OF canvas
-                        """,
+                    revision = await lock_canvas_write_access(
+                        conn,
                         connection.canvas_id,
                         connection.identity.user.id,
                         connection.identity.token_hash,
                     )
-                    if access is None:
+                    if revision is None:
                         return _operation_error(
                             command.operation_id,
                             "access_revoked",
@@ -778,7 +788,7 @@ class CanvasRooms:
                             "deleted": operation_kind == "delete",
                         }
 
-                    revision = access["revision"] + 1
+                    revision += 1
                     result: dict[str, object] = {
                         "type": "operation.applied",
                         "operation_id": str(command.operation_id),

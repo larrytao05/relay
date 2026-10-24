@@ -1,5 +1,6 @@
 import { useRef, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { BOARD_HEIGHT, BOARD_WIDTH, pointFromClient, shapeBounds } from "../../editor/geometry.ts";
+import { isTextWithinLimit, TEXT_LENGTH_ERROR_MESSAGE } from "../../editor/text.ts";
 import type { Interaction, Peer, Point, ResizeHandle, Shape, Tool } from "../../editor/types.ts";
 
 export default function EditorStage({
@@ -175,7 +176,6 @@ export default function EditorStage({
               autoFocus
               aria-label="Edit text on whiteboard"
               value={textSession.draft}
-              maxLength={10_000}
               style={{
                 left: `${(textSession.start.x / BOARD_WIDTH) * 100}%`,
                 top: `${(textSession.start.y / BOARD_HEIGHT) * 100}%`,
@@ -191,6 +191,7 @@ export default function EditorStage({
               onClick={(event) => event.stopPropagation()}
             />
           )}
+          {textSession && !isTextWithinLimit(textSession.draft) && <p className="editor-text-error" role="alert">{TEXT_LENGTH_ERROR_MESSAGE}</p>}
         </div>
       </div>
       <p className="editor-stage-hint">

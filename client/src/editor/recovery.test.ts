@@ -8,8 +8,11 @@ test("a non-contiguous applied revision triggers fresh-snapshot recovery", () =>
   assert.equal(isRevisionGap(8, 8), false);
 });
 
-test("queue overflow and revision-gap closes reconnect, while policy close is terminal", () => {
+test("protocol and policy closes are terminal while transport and recovery closes reconnect", () => {
+  assert.equal(shouldRetrySocketClose(1006), true);
   assert.equal(shouldRetrySocketClose(1013), true);
   assert.equal(shouldRetrySocketClose(4003), true);
+  assert.equal(shouldRetrySocketClose(4004), true);
+  assert.equal(shouldRetrySocketClose(4002), false);
   assert.equal(shouldRetrySocketClose(1008), false);
 });

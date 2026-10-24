@@ -41,14 +41,17 @@ Return the same login error for unknown usernames and incorrect passwords.
 Connect to `/ws/canvases/{canvas_id}` using the same cookie. Authenticate and check membership before accepting the connection.
 The existing Vite `/ws` proxy supports this path.
 
-Logout closes every canvas connection using that exact session, including tabs on different canvases; other logins for the account remain active. Idle connections check their recorded session expiry once per second and close with WebSocket code `1008` after expiry. Every incoming frame rechecks persisted session and membership. Logout serializes with admitted room commands, detaches revoked connections, and stops their queued delivery before returning.
+Logout closes every canvas connection in the current worker using that exact session, including tabs on different canvases; other logins for the account remain active. Idle connections check their recorded session expiry once per second and close with WebSocket code `1008` after expiry. Every incoming frame rechecks persisted session and membership. Logout serializes with admitted room commands, detaches revoked connections, and stops their queued delivery before returning.
+Durable commands lock the valid session row before the canvas row until commit. Logout waits for admitted writes before deleting that session. If deletion cannot acquire its lock within five seconds, logout returns `503` and preserves the session cookie and local connections.
 
 The first server message is a `snapshot` containing the canvas, its `canvas_revision`, all visible shapes, current presence, and this connection's `connection_id`.
+Authorization, canvas metadata, and shapes are read in one repeatable-read database transaction. The transaction ends before the snapshot is queued for delivery.
 The snapshot's `connections` list includes each active connection, including this tab, with `connection_id`, public `user`, and `cursor`. Cursor positions contain each connection's latest canvas coordinates, or null when hidden.
 Subscribe and load the snapshot under the same canvas queue used for edits so that an update cannot disappear between those steps.
 Reconnect by obtaining a fresh snapshot.
 
 Invalid frames return `invalid_message`. `shape.create`, `shape.update`, and `shape.delete` persist and broadcast accepted operations; exact retries return the saved acknowledgement only to the requester. Undo and redo use server-recorded inverse data and connection-local navigation. Origin configuration and the single-worker deployment requirement are documented in [WEBSOCKET_CONNECTIONS.md](server/WEBSOCKET_CONNECTIONS.md).
+Text is limited to 10,000 Unicode code points in requests, browser editing, and server-message parsing. The browser preserves an over-limit draft for correction or explicit cancellation. An unreadable server frame closes the browser's socket with `4002` and displays a terminal error without automatic retries.
 
 | Client message | Fields besides `type` | Effect |
 | --- | --- | --- |

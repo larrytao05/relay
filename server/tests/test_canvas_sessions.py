@@ -7,8 +7,9 @@ import sys
 import threading
 import unittest
 from concurrent.futures import CancelledError as FutureCancelledError
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 from uuid import uuid4
 
 import anyio
@@ -22,7 +23,9 @@ from test_canvas_create import (
     awaitable_result,
 )
 
-from app.auth import hash_session_token
+from app.auth import PublicUser, hash_session_token
+from app.canvas_protocol import _CreateCommand, _UndoCommand
+from app.canvas_ws import CanvasRooms, Connection, Room, SessionIdentity
 from app.main import app
 
 
@@ -296,6 +299,346 @@ class CanvasSessionPostgresTests(unittest.TestCase):
             return revision, shapes, operations
         finally:
             await conn.close()
+
+
+@unittest.skipUnless(os.environ.get("TEST_DATABASE_URL"), "requires TEST_DATABASE_URL")
+class DurableLogoutOrderingPostgresTests(unittest.TestCase):
+    def setUp(self):
+        from test_canvas_create import CanvasCreatePostgresTests
+
+        self.fixtures = CanvasCreatePostgresTests()
+
+    def test_logout_waits_for_admitted_shape_write(self):
+        self._assert_admitted_write_waits_for_logout("shape")
+
+    def test_logout_waits_for_admitted_history_write(self):
+        self._assert_admitted_write_waits_for_logout("history")
+
+    def test_deleted_session_rejects_shape_write_without_effects(self):
+        self._assert_deleted_session_rejects_write("shape")
+
+    def test_deleted_session_rejects_history_write_without_effects(self):
+        self._assert_deleted_session_rejects_write("history")
+
+    def test_uncommitted_delete_blocks_and_rejects_shape_write_without_effects(self):
+        self._assert_uncommitted_delete_rejects_write("shape")
+
+    def test_uncommitted_delete_blocks_and_rejects_history_write_without_effects(self):
+        self._assert_uncommitted_delete_rejects_write("history")
+
+    def test_logout_lock_timeout_preserves_session_and_local_state(self):
+        with self.fixtures._board() as board, TestClient(app) as client:
+            client.cookies.set("session", board["token_a"])
+            rooms = client.app.state.canvas_rooms
+            original_revoke = rooms.revoke_session
+            revoked = []
+
+            async def track_revoke(token_hash):
+                revoked.append(token_hash)
+                await original_revoke(token_hash)
+
+            rooms.revoke_session = track_revoke
+            try:
+                status_code, set_cookie, session_exists = asyncio.run(
+                    self._logout_times_out(board, client)
+                )
+            finally:
+                rooms.revoke_session = original_revoke
+
+            self.assertEqual(status_code, 503)
+            self.assertIsNone(set_cookie)
+            self.assertEqual(client.cookies.get("session"), board["token_a"])
+            self.assertEqual(revoked, [])
+            self.assertTrue(session_exists)
+
+    async def _logout_times_out(self, board, client):
+        conn = await asyncpg.connect(board["url"])
+        try:
+            async with conn.transaction():
+                await conn.fetchrow(
+                    "SELECT token_hash FROM auth_session WHERE token_hash = $1 FOR KEY SHARE",
+                    hash_session_token(board["token_a"]),
+                )
+                with patch("app.auth._LOGOUT_LOCK_TIMEOUT", "50ms"):
+                    response = await asyncio.to_thread(client.post, "/api/auth/logout")
+                exists = await conn.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM auth_session WHERE token_hash = $1)",
+                    hash_session_token(board["token_a"]),
+                )
+                return response.status_code, response.headers.get("set-cookie"), exists
+        finally:
+            await conn.close()
+
+    def _assert_admitted_write_waits_for_logout(self, kind):
+        with self.fixtures._board() as board, TestClient(app) as client:
+            client.cookies.set("session", board["token_a"])
+            self.assertTrue(
+                asyncio.run(self._admitted_write_waits(board, client, kind))
+            )
+
+    def _assert_deleted_session_rejects_write(self, kind):
+        with self.fixtures._board() as board, TestClient(app) as client:
+            client.cookies.set("session", board["token_a"])
+            self.assertTrue(
+                asyncio.run(self._deleted_session_rejects(board, client, kind))
+            )
+
+    def _assert_uncommitted_delete_rejects_write(self, kind):
+        with self.fixtures._board() as board:
+            self.assertTrue(asyncio.run(self._uncommitted_delete_rejects(board, kind)))
+
+    async def _admitted_write_waits(self, board, client, kind):
+        pool = await asyncpg.create_pool(board["url"], min_size=1, max_size=4)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        rooms = CanvasRooms(pool=_GatedPool(pool, entered, release))
+        connection = _connection(board)
+        command, room = await self._write_command(kind, pool, connection)
+        command_task = asyncio.create_task(
+            self._apply(rooms, connection, command, room)
+        )
+        logout_task = None
+        blocked = False
+        state = None
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            logout_task = asyncio.create_task(
+                asyncio.to_thread(client.post, "/api/auth/logout")
+            )
+            blocked = await _logout_delete_is_blocked(pool)
+        finally:
+            release.set()
+            result, committed = await command_task
+            response = await logout_task if logout_task is not None else None
+            state = await _canvas_state(pool, board)
+            await pool.close()
+
+        self.assertTrue(blocked, "logout DELETE did not wait on the admitted command")
+        self.assertTrue(committed)
+        self.assertEqual(result["type"], "operation.applied")
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(state, (1, 1, 1) if kind == "shape" else (2, 1, 2))
+        return True
+
+    async def _deleted_session_rejects(self, board, client, kind):
+        pool = await asyncpg.create_pool(board["url"], min_size=1, max_size=3)
+        try:
+            connection = _connection(board)
+            rooms = CanvasRooms(pool=pool)
+            if kind == "history":
+                create = _create_command()
+                _created, committed = await rooms._apply_shape_command(
+                    connection, create
+                )
+                self.assertTrue(committed)
+                connection.history.record_edit(create.operation_id)
+                room = Room()
+                room.operation_origins[create.operation_id] = connection.id
+                command = _UndoCommand(
+                    type="undo",
+                    operation_id=uuid4(),
+                    target_operation_id=create.operation_id,
+                )
+                before = await _canvas_state(pool, board)
+            else:
+                command = _create_command()
+                room = Room()
+                before = await _canvas_state(pool, board)
+
+            response = await asyncio.to_thread(client.post, "/api/auth/logout")
+            self.assertEqual(response.status_code, 204)
+            result, committed = await self._apply(rooms, connection, command, room)
+            self.assertFalse(committed)
+            self.assertEqual(result["code"], "access_revoked")
+            self.assertEqual(await _canvas_state(pool, board), before)
+            return True
+        finally:
+            await pool.close()
+
+    async def _uncommitted_delete_rejects(self, board, kind):
+        application_name = f"logout_delete_{uuid4().hex}"
+        pool = await asyncpg.create_pool(
+            board["url"],
+            min_size=1,
+            max_size=3,
+            server_settings={"application_name": application_name},
+        )
+        blocker = await asyncpg.connect(board["url"])
+        command_task = None
+        try:
+            connection = _connection(board)
+            rooms = CanvasRooms(pool=pool)
+            command, room = await self._write_command(kind, pool, connection)
+            before = await _canvas_state(pool, board)
+
+            async with blocker.transaction():
+                await blocker.execute(
+                    "DELETE FROM auth_session WHERE token_hash=$1",
+                    hash_session_token(board["token_a"]),
+                )
+                command_task = asyncio.create_task(
+                    self._apply(rooms, connection, command, room)
+                )
+                blocked = await _session_access_read_is_blocked(pool, application_name)
+
+            result, committed = await asyncio.wait_for(command_task, timeout=3)
+            self.assertTrue(
+                blocked,
+                "canvas command did not wait for the uncommitted session delete",
+            )
+            self.assertFalse(committed)
+            self.assertEqual(result["code"], "access_revoked")
+            self.assertEqual(await _canvas_state(pool, board), before)
+            return True
+        finally:
+            if command_task is not None and not command_task.done():
+                command_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await command_task
+            await blocker.close()
+            await pool.close()
+
+    async def _write_command(self, kind, pool, connection):
+        if kind == "shape":
+            return _create_command(), None
+        seed = _create_command()
+        result, committed = await CanvasRooms(pool=pool)._apply_shape_command(
+            connection, seed
+        )
+        self.assertTrue(committed, result)
+        connection.history.record_edit(seed.operation_id)
+        room = Room()
+        room.operation_origins[seed.operation_id] = connection.id
+        return (
+            _UndoCommand(
+                type="undo", operation_id=uuid4(), target_operation_id=seed.operation_id
+            ),
+            room,
+        )
+
+    async def _apply(self, rooms, connection, command, room):
+        if isinstance(command, _UndoCommand):
+            return await rooms._apply_history_command(connection, room, command)
+        return await rooms._apply_shape_command(connection, command)
+
+
+class _GatedPool:
+    def __init__(self, pool, entered, release):
+        self.pool = pool
+        self.entered = entered
+        self.release = release
+
+    @asynccontextmanager
+    async def acquire(self):
+        async with self.pool.acquire() as connection:
+            yield _GatedConnection(connection, self.entered, self.release)
+
+
+class _GatedConnection:
+    def __init__(self, connection, entered, release):
+        self.connection = connection
+        self.entered = entered
+        self.release = release
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+    async def fetchrow(self, query, *args):
+        row = await self.connection.fetchrow(query, *args)
+        if "auth_session.token_hash" in query:
+            self.entered.set()
+            await self.release.wait()
+        return row
+
+
+def _connection(board):
+    return Connection(
+        id=uuid4(),
+        canvas_id=board["canvas_id"],
+        identity=SessionIdentity(
+            hash_session_token(board["token_a"]),
+            PublicUser(id=board["user_a"], username=f"a_{board['user_a'].hex}"),
+            datetime.now(UTC) + timedelta(hours=1),
+        ),
+        socket=None,
+        outbound=asyncio.Queue(),
+    )
+
+
+def _create_command():
+    kind, properties = _shape_cases()[0]
+    return _CreateCommand(
+        type="shape.create",
+        operation_id=uuid4(),
+        shape_id=uuid4(),
+        kind=kind,
+        properties=properties,
+    )
+
+
+async def _logout_delete_is_blocked(pool):
+    async with pool.acquire() as conn:
+
+        async def wait_for_lock():
+            while True:
+                blocked = await conn.fetchval(
+                    """SELECT EXISTS (
+                           SELECT 1 FROM pg_stat_activity
+                           WHERE datname = current_database()
+                             AND query LIKE 'DELETE FROM auth_session WHERE token_hash =%'
+                             AND wait_event_type = 'Lock'
+                             AND cardinality(pg_blocking_pids(pid)) > 0
+                       )"""
+                )
+                if blocked:
+                    return True
+                await asyncio.sleep(0.01)
+
+        try:
+            return await asyncio.wait_for(wait_for_lock(), timeout=3)
+        except TimeoutError:
+            return False
+
+
+async def _session_access_read_is_blocked(pool, application_name):
+    async with pool.acquire() as conn:
+
+        async def wait_for_lock():
+            while True:
+                blocked = await conn.fetchval(
+                    """SELECT EXISTS (
+                           SELECT 1 FROM pg_stat_activity
+                           WHERE datname = current_database()
+                             AND application_name = $1
+                             AND query LIKE '%SELECT auth_session.user_id%'
+                             AND wait_event_type = 'Lock'
+                             AND cardinality(pg_blocking_pids(pid)) > 0
+                       )""",
+                    application_name,
+                )
+                if blocked:
+                    return True
+                await asyncio.sleep(0.01)
+
+        try:
+            return await asyncio.wait_for(wait_for_lock(), timeout=3)
+        except TimeoutError:
+            return False
+
+
+async def _canvas_state(pool, board):
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT revision,
+                      (SELECT count(*) FROM shape
+                       WHERE canvas_id = $1 AND id <> $2) AS shapes,
+                      (SELECT count(*) FROM canvas_operation WHERE canvas_id = $1)
+                       AS operations
+               FROM canvas WHERE id = $1""",
+            board["canvas_id"],
+            board["reserved_shape_id"],
+        )
+        return row["revision"], row["shapes"], row["operations"]
 
 
 def _receive_presence(socket, event_type, timeout=1):

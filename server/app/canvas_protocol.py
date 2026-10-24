@@ -13,10 +13,13 @@ _COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 _APPEARANCE_PROPERTIES = frozenset({"opacity", "z_index"})
 _KIND_PROPERTIES: dict[str, frozenset[str]] = {
-    "rectangle": frozenset({"x", "y", "width", "height", "color"}) | _APPEARANCE_PROPERTIES,
-    "ellipse": frozenset({"x", "y", "width", "height", "color"}) | _APPEARANCE_PROPERTIES,
+    "rectangle": frozenset({"x", "y", "width", "height", "color"})
+    | _APPEARANCE_PROPERTIES,
+    "ellipse": frozenset({"x", "y", "width", "height", "color"})
+    | _APPEARANCE_PROPERTIES,
     "line": frozenset({"x1", "y1", "x2", "y2", "color"}) | _APPEARANCE_PROPERTIES,
-    "text": frozenset({"x", "y", "width", "height", "text", "font_size", "color"}) | _APPEARANCE_PROPERTIES,
+    "text": frozenset({"x", "y", "width", "height", "text", "font_size", "color"})
+    | _APPEARANCE_PROPERTIES,
 }
 
 

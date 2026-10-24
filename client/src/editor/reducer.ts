@@ -1,6 +1,7 @@
 import type { DurableCommand, EditorState, OptimisticIntent, ServerEvent, Shape, Tool } from "./types.ts";
 import { initialEditorState } from "./types.ts";
 import { changedProperties, propertiesConflict, rebaseInteraction, withPropertyPatch } from "./conflicts.ts";
+import { isTextWithinLimit } from "./text.ts";
 
 export type EditorAction =
   | { type: "connection.started" }
@@ -57,7 +58,9 @@ export function editorReducer(state: EditorState = initialEditorState, action: E
     case "pending": return { ...state, pending: action.command, optimistic: action.optimistic };
     case "pending.retried":
       return state.pending ? { ...state, pending: { ...state.pending, recoveryReplay: true } } : state;
-    case "tool": return { ...state, tool: action.tool, interaction: { kind: "idle" } };
+    case "tool": return state.interaction.kind === "editingText" && !isTextWithinLimit(state.interaction.draft)
+      ? state
+      : { ...state, tool: action.tool, interaction: { kind: "idle" } };
     case "color": return { ...state, defaultColor: action.color };
     case "selection": return { ...state, selectionId: action.id, interaction: { kind: "idle" } };
     case "interaction": return { ...state, interaction: action.interaction };

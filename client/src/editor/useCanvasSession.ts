@@ -2,6 +2,7 @@ import { useCallback, useEffect, useReducer, useRef } from "react";
 import { editorReducer, type EditorAction } from "./reducer.ts";
 import { parseServerEvent } from "./protocol.ts";
 import { isRevisionGap, shouldRetrySocketClose } from "./recovery.ts";
+import { isTextWithinLimit, TEXT_LENGTH_ERROR_MESSAGE } from "./text.ts";
 import { initialEditorState, type DurableCommand, type EditorState, type OptimisticIntent, type Point, type ServerEvent } from "./types.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -46,16 +47,24 @@ export function useCanvasSession(canvasId: string | undefined) {
       const generation = ++generationRef.current;
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const socket = new WebSocket(`${protocol}//${window.location.host}/ws/canvases/${encodeURIComponent(routeCanvasId)}`);
+      let protocolFailure: string | null = null;
       socketRef.current = socket;
 
       socket.onopen = () => { retryAttempt.current = 0; };
       socket.onmessage = (message) => {
-        if (generation !== generationRef.current || typeof message.data !== "string") return;
+        if (generation !== generationRef.current) return;
+        if (typeof message.data !== "string") {
+          protocolFailure = "The server sent an unsupported message frame.";
+          dispatch({ type: "connection.failed", message: protocolFailure });
+          socket.close(4002, "Invalid server event");
+          return;
+        }
         let event: ServerEvent;
         try {
           event = parseServerEvent(message.data);
         } catch (error) {
-          dispatch({ type: "notice", message: error instanceof Error ? error.message : "The server sent an unreadable update." });
+          protocolFailure = error instanceof Error ? error.message : "The server sent an unreadable update.";
+          dispatch({ type: "connection.failed", message: protocolFailure });
           socket.close(4002, "Invalid server event");
           return;
         }
@@ -95,6 +104,11 @@ export function useCanvasSession(canvasId: string | undefined) {
         if (generation !== generationRef.current) return;
         socketRef.current = null;
         if (cancelledRef.current) return;
+        if (protocolFailure) return;
+        if (event.code === 4002) {
+          dispatch({ type: "connection.failed", message: "The server sent an invalid update. Reload the canvas to try again." });
+          return;
+        }
         if (!shouldRetrySocketClose(event.code)) {
           dispatch({ type: "connection.failed", message: "This canvas is unavailable or your access has expired. Return to canvases and sign in again." });
           return;
@@ -124,6 +138,15 @@ export function useCanvasSession(canvasId: string | undefined) {
   const sendOperation = useCallback((command: DurableCommand, optimistic: OptimisticIntent | null = null): boolean => {
     const socket = socketRef.current;
     const current = stateRef.current;
+    const text = command.type === "shape.create" && command.kind === "text" && "text" in command.properties
+      ? command.properties.text
+      : command.type === "shape.update" && typeof command.patch.text === "string"
+        ? command.patch.text
+        : null;
+    if (text !== null && !isTextWithinLimit(text)) {
+      dispatch({ type: "notice", message: TEXT_LENGTH_ERROR_MESSAGE });
+      return false;
+    }
     if (pendingGuard.current || current.pending || current.phase !== "ready") return false;
     if (socket?.readyState !== WebSocket.OPEN) {
       dispatch({ type: "notice", message: "The connection is reconnecting. Try that change again when it is ready." });

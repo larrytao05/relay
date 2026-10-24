@@ -379,3 +379,41 @@ test("an uncertain text create is retained if access expires before its outcome 
   assert.equal(state.optimistic, null);
   assert.deepEqual(state.recoveredTextDraft, { shapeId: textShape.id, text: textShape.properties.text, properties: textShape.properties });
 });
+
+test("tool changes preserve over-limit text drafts until corrected or canceled", () => {
+  const draft = "x".repeat(10_001);
+  const newTextEdit: EditorState = {
+    ...readyState(),
+    interaction: { kind: "editingText", sessionId: "new-text", shapeId: null, expectedRevision: null, start: { x: 10, y: 10 }, width: 120, height: 32, color: "#ffffff", fontSize: 16, draft },
+  };
+  const textShape: Shape = {
+    id: shapeId,
+    kind: "text",
+    properties: { x: 10, y: 10, width: 120, height: 32, color: "#ffffff", text: "Saved", font_size: 16 },
+    revision: 1,
+    deleted: false,
+  };
+  const existingTextEdit: EditorState = {
+    ...readyState(),
+    shapes: { [shapeId]: textShape },
+    interaction: { kind: "editingText", sessionId: "existing-text", shapeId, expectedRevision: 1, start: { x: 10, y: 10 }, width: 120, height: 32, color: "#ffffff", fontSize: 16, draft },
+  };
+
+  for (const editing of [newTextEdit, existingTextEdit]) {
+    const next = editorReducer(editing, { type: "tool", tool: "rectangle" });
+    assert.equal(next.tool, editing.tool);
+    assert.equal(next.interaction.kind, "editingText");
+    if (next.interaction.kind !== "editingText") throw new Error("Over-limit text draft was discarded");
+    assert.equal(next.interaction.draft, draft);
+  }
+
+  const corrected = editorReducer(newTextEdit, { type: "text.draft", draft: "short" });
+  const switched = editorReducer(corrected, { type: "tool", tool: "rectangle" });
+  assert.equal(switched.tool, "rectangle");
+  assert.equal(switched.interaction.kind, "idle");
+
+  const canceled = editorReducer(newTextEdit, { type: "interaction", interaction: { kind: "idle" } });
+  const switchedAfterCancel = editorReducer(canceled, { type: "tool", tool: "rectangle" });
+  assert.equal(switchedAfterCancel.tool, "rectangle");
+  assert.equal(switchedAfterCancel.interaction.kind, "idle");
+});

@@ -122,7 +122,8 @@ class PropertyMergeHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         conn = AsyncMock()
         conn.transaction = transaction
-        conn.fetchrow.side_effect = [{"revision": 2}, current]
+        user_id = uuid4()
+        conn.fetchrow.side_effect = [{"user_id": user_id}, {"revision": 2}, current]
         conn.fetch.return_value = [operation(1), operation(2, {"color": "#abcdef"})]
 
         @asynccontextmanager
@@ -140,7 +141,7 @@ class PropertyMergeHandlerTests(unittest.IsolatedAsyncioTestCase):
             canvas_id,
             SessionIdentity(
                 "digest",
-                PublicUser(id=uuid4(), username="tester"),
+                PublicUser(id=user_id, username="tester"),
                 datetime.now(UTC) + timedelta(hours=1),
             ),
             None,

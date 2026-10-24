@@ -1,4 +1,5 @@
 import type { CanvasSnapshot, Peer, Point, ServerEvent, Shape } from "./types.ts";
+import { isTextWithinLimit } from "./text.ts";
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -99,7 +100,7 @@ function parseShape(value: unknown): Shape {
       if (!finite(properties.x1) || !finite(properties.y1) || !finite(properties.x2) || !finite(properties.y2)) throw new Error("The server sent invalid line geometry.");
       return { ...base, kind: "line", properties: { x1: properties.x1, y1: properties.y1, x2: properties.x2, y2: properties.y2, color: properties.color, opacity, z_index: zIndex } };
     case "text":
-      if (!finite(properties.x) || !finite(properties.y) || !positive(properties.width) || !positive(properties.height) || !positive(properties.font_size) || typeof properties.text !== "string" || properties.text.length > 10_000) throw new Error("The server sent invalid text properties.");
+      if (!finite(properties.x) || !finite(properties.y) || !positive(properties.width) || !positive(properties.height) || !positive(properties.font_size) || typeof properties.text !== "string" || !isTextWithinLimit(properties.text)) throw new Error("The server sent invalid text properties.");
       return { ...base, kind: "text", properties: { x: properties.x, y: properties.y, width: properties.width, height: properties.height, color: properties.color, opacity, z_index: zIndex, text: properties.text, font_size: properties.font_size } };
     default:
       throw new Error("The server sent an unsupported shape kind.");

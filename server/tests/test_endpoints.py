@@ -126,6 +126,9 @@ class MemoryConnection:
         raise AssertionError(f"Unexpected query: {query}")
 
     async def fetchval(self, query: str, *args):
+        if query.strip() == "SELECT set_config('lock_timeout', $1, true)":
+            return args[0]
+
         if "SELECT EXISTS" in query:
             return (args[0], args[1]) in self.database.canvas_members
         raise AssertionError(f"Unexpected query: {query}")

@@ -96,3 +96,64 @@ test("rejects inconsistent snapshots and incomplete applied events", () => {
   assert.throws(() => parseServerEvent(JSON.stringify({ type: "operation.applied", operation_id: "00000000-0000-4000-8000-000000000005", actor_id: user, kind: "made-up", canvas_revision: 2, target_operation_id: null, shape })));
   assert.throws(() => parseServerEvent(JSON.stringify({ type: "operation.applied", operation_id: "00000000-0000-4000-8000-000000000005", actor_id: user, kind: "create", canvas_revision: 2, shape })));
 });
+
+test("accepts code-point-limit text in snapshots and applied events", () => {
+  for (const character of ["a", "é", "🧪"]) {
+    const textShape = {
+      id: "00000000-0000-4000-8000-000000000006",
+      kind: "text",
+      properties: { x: 1, y: 2, width: 40, height: 20, color: "#abcdef", font_size: 12, text: character.repeat(10_000) },
+      revision: 1,
+      deleted: false,
+    };
+    const snapshot = parseServerEvent(JSON.stringify({
+      type: "snapshot",
+      canvas: { id: canvas, title: "Sketch", created_by: user, revision: 1, created_at: "now", updated_at: "now" },
+      canvas_revision: 1,
+      shapes: [textShape],
+      connection_id: connection,
+      connections: [{ connection_id: connection, user: { id: user, username: "alice" }, cursor: null }],
+    }));
+    const applied = parseServerEvent(JSON.stringify({
+      type: "operation.applied",
+      operation_id: "00000000-0000-4000-8000-000000000005",
+      actor_id: user,
+      kind: "create",
+      target_operation_id: null,
+      canvas_revision: 2,
+      shape: textShape,
+    }));
+
+    assert.equal(snapshot.type, "snapshot");
+    if (snapshot.type === "snapshot") assert.equal(snapshot.shapes[0].properties.text, textShape.properties.text);
+    assert.equal(applied.type, "operation.applied");
+    if (applied.type === "operation.applied") assert.equal(applied.shape.properties.text, textShape.properties.text);
+  }
+});
+
+test("rejects text exceeding the code-point limit in snapshots and applied events", () => {
+  const textShape = {
+    id: "00000000-0000-4000-8000-000000000006",
+    kind: "text",
+    properties: { x: 1, y: 2, width: 40, height: 20, color: "#abcdef", font_size: 12, text: "🧪".repeat(10_001) },
+    revision: 1,
+    deleted: false,
+  };
+  assert.throws(() => parseServerEvent(JSON.stringify({
+    type: "snapshot",
+    canvas: { id: canvas, title: "Sketch", created_by: user, revision: 1, created_at: "now", updated_at: "now" },
+    canvas_revision: 1,
+    shapes: [textShape],
+    connection_id: connection,
+    connections: [{ connection_id: connection, user: { id: user, username: "alice" }, cursor: null }],
+  })));
+  assert.throws(() => parseServerEvent(JSON.stringify({
+    type: "operation.applied",
+    operation_id: "00000000-0000-4000-8000-000000000005",
+    actor_id: user,
+    kind: "create",
+    target_operation_id: null,
+    canvas_revision: 2,
+    shape: textShape,
+  })));
+});

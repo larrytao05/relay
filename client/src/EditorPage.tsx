@@ -7,6 +7,7 @@ import EditorToolbar from "./components/editor/EditorToolbar.tsx";
 import InviteDialog from "./components/editor/InviteDialog.tsx";
 import SelectionInspector from "./components/editor/SelectionInspector.tsx";
 import { BOARD_HEIGHT, BOARD_WIDTH, normalizedBox, previewShape, shapeBounds } from "./editor/geometry.ts";
+import { isTextWithinLimit } from "./editor/text.ts";
 import { useCanvasSession } from "./editor/useCanvasSession.ts";
 import type { Interaction, Point, ResizeHandle, Shape, Tool } from "./editor/types.ts";
 import "./EditorPage.css";
@@ -137,8 +138,9 @@ export default function EditorPage() {
     if (consumedTextSessions.current.has(sessionId)) return;
     const active = interactionRef.current;
     if (active.kind !== "editingText" || active.sessionId !== sessionId) return;
-    consumedTextSessions.current.add(sessionId);
     const value = draftRef.current?.sessionId === sessionId ? draftRef.current.value : active.draft;
+    if (!isTextWithinLimit(value)) return;
+    consumedTextSessions.current.add(sessionId);
     draftRef.current = null;
     if (!active.shapeId) {
       if (!value.trim()) {

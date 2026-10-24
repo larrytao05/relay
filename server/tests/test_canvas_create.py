@@ -448,9 +448,42 @@ def _ws(canvas_id):
 
 def _shape_cases():
     return [
-        ("rectangle", {"x": 1, "y": 2, "width": 30, "height": 40, "color": "#112233"}),
-        ("ellipse", {"x": 1, "y": 2, "width": 30, "height": 40, "color": "#112233"}),
-        ("line", {"x1": 1, "y1": 2, "x2": 30, "y2": 40, "color": "#112233"}),
+        (
+            "rectangle",
+            {
+                "x": 1,
+                "y": 2,
+                "width": 30,
+                "height": 40,
+                "color": "#112233",
+                "opacity": 1,
+                "z_index": 0,
+            },
+        ),
+        (
+            "ellipse",
+            {
+                "x": 1,
+                "y": 2,
+                "width": 30,
+                "height": 40,
+                "color": "#112233",
+                "opacity": 1,
+                "z_index": 0,
+            },
+        ),
+        (
+            "line",
+            {
+                "x1": 1,
+                "y1": 2,
+                "x2": 30,
+                "y2": 40,
+                "color": "#112233",
+                "opacity": 1,
+                "z_index": 0,
+            },
+        ),
         (
             "text",
             {
@@ -461,6 +494,8 @@ def _shape_cases():
                 "text": "hello",
                 "font_size": 16,
                 "color": "#112233",
+                "opacity": 1,
+                "z_index": 0,
             },
         ),
     ]

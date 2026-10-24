@@ -18,6 +18,35 @@ from app.auth import hash_session_token
 from app.main import app
 
 
+class _SnapshotConnectionProxy:
+    def __init__(self, connection, after_metadata=None):
+        self.connection = connection
+        self.after_metadata = after_metadata
+        self.transaction_options = None
+        self.metadata_reads = 0
+        self.shape_reads = 0
+
+    def transaction(self, **options):
+        self.transaction_options = options
+        return self.connection.transaction(**options)
+
+    async def fetchval(self, *args):
+        return await self.connection.fetchval(*args)
+
+    async def fetchrow(self, query, *args):
+        row = await self.connection.fetchrow(query, *args)
+        if "FROM canvas WHERE id = $1" in query:
+            self.metadata_reads += 1
+            if self.after_metadata is not None:
+                await self.after_metadata()
+        return row
+
+    async def fetch(self, query, *args):
+        if "FROM shape WHERE canvas_id = $1" in query:
+            self.shape_reads += 1
+        return await self.connection.fetch(query, *args)
+
+
 @unittest.skipUnless(os.environ.get("TEST_DATABASE_URL"), "requires TEST_DATABASE_URL")
 class CanvasWebSocketPostgresTests(unittest.TestCase):
     def test_snapshot_is_first_frame_and_contains_only_visible_shapes(self):
@@ -56,6 +85,89 @@ class CanvasWebSocketPostgresTests(unittest.TestCase):
                         }
                     ],
                 )
+
+    def test_snapshot_uses_one_repeatable_read_state_during_concurrent_commit(self):
+        from app.auth import PublicUser
+        from app.canvas_ws import CanvasRooms, SessionIdentity
+
+        with self._seeded_board() as board:
+            identity = SessionIdentity(
+                hash_session_token(board["token"]),
+                PublicUser(id=board["user_id"], username=board["username"]),
+                datetime.now(UTC) + timedelta(hours=1),
+            )
+
+            async def read_snapshot():
+                reader = await asyncpg.connect(board["database_url"])
+                writer = await asyncpg.connect(board["database_url"])
+                writer_committed = False
+
+                async def commit_new_state():
+                    nonlocal writer_committed
+                    async with writer.transaction():
+                        await writer.execute(
+                            "UPDATE canvas SET revision = 8 WHERE id = $1",
+                            board["canvas_id"],
+                        )
+                        await writer.execute(
+                            "UPDATE shape SET revision = 3, properties = $2::jsonb WHERE id = $1",
+                            board["shape_id"],
+                            json.dumps({"x": 30, "y": 40}),
+                        )
+                    writer_committed = True
+
+                proxy = _SnapshotConnectionProxy(reader, commit_new_state)
+                try:
+                    snapshot = await CanvasRooms()._snapshot(
+                        proxy, board["canvas_id"], identity
+                    )
+                    return snapshot, proxy, writer_committed
+                finally:
+                    await reader.close()
+                    await writer.close()
+
+            snapshot, proxy, writer_committed = asyncio.run(read_snapshot())
+            self.assertTrue(writer_committed)
+            self.assertEqual(
+                proxy.transaction_options,
+                {"isolation": "repeatable_read", "readonly": True},
+            )
+            self.assertEqual(proxy.metadata_reads, 1)
+            self.assertEqual(proxy.shape_reads, 1)
+            self.assertEqual(snapshot["canvas_revision"], 7)
+            self.assertEqual(snapshot["shapes"][0]["revision"], 2)
+            self.assertEqual(snapshot["shapes"][0]["properties"]["x"], 3)
+
+    def test_snapshot_rejects_invalid_session_before_reading_canvas_data(self):
+        from app.auth import PublicUser
+        from app.canvas_ws import CanvasRooms, SessionIdentity
+
+        with self._seeded_board() as board:
+            identity = SessionIdentity(
+                hash_session_token(f"invalid-{uuid4().hex}"),
+                PublicUser(id=board["user_id"], username=board["username"]),
+                datetime.now(UTC) + timedelta(hours=1),
+            )
+
+            async def read_snapshot():
+                conn = await asyncpg.connect(board["database_url"])
+                proxy = _SnapshotConnectionProxy(conn)
+                try:
+                    snapshot = await CanvasRooms()._snapshot(
+                        proxy, board["canvas_id"], identity
+                    )
+                    return snapshot, proxy
+                finally:
+                    await conn.close()
+
+            snapshot, proxy = asyncio.run(read_snapshot())
+            self.assertIsNone(snapshot)
+            self.assertEqual(
+                proxy.transaction_options,
+                {"isolation": "repeatable_read", "readonly": True},
+            )
+            self.assertEqual(proxy.metadata_reads, 0)
+            self.assertEqual(proxy.shape_reads, 0)
 
     def test_access_matrix_rejects_before_snapshot(self):
         with self._seeded_board() as board:

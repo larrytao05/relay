@@ -8,6 +8,8 @@ from uuid import UUID
 
 import asyncpg
 
+from app.canvas_access import lock_canvas_write_access
+
 logger = logging.getLogger(__name__)
 
 
@@ -77,23 +79,13 @@ async def apply_history_command(
     try:
         async with pool.acquire() as conn:  # noqa: SIM117
             async with conn.transaction():
-                access = await conn.fetchrow(
-                    """
-                    SELECT canvas.revision
-                    FROM canvas
-                    JOIN canvas_member ON canvas_member.canvas_id = canvas.id
-                    JOIN auth_session ON auth_session.user_id = canvas_member.user_id
-                    WHERE canvas.id = $1
-                      AND canvas_member.user_id = $2
-                      AND auth_session.token_hash = $3
-                      AND auth_session.expires_at > now()
-                    FOR UPDATE OF canvas
-                    """,
+                revision = await lock_canvas_write_access(
+                    conn,
                     connection.canvas_id,
                     connection.identity.user.id,
                     connection.identity.token_hash,
                 )
-                if access is None:
+                if revision is None:
                     return _error(
                         operation_id,
                         "access_revoked",
@@ -209,7 +201,7 @@ async def apply_history_command(
                                 after_record[key] = source_after[key]
                             properties[key] = after_record[key]
 
-                revision = access["revision"] + 1
+                revision += 1
                 shape_revision = shape["revision"] + 1
                 await conn.execute(
                     """UPDATE shape SET properties=$2::jsonb,
