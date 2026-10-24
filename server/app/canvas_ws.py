@@ -6,6 +6,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from time import monotonic
 from uuid import UUID, uuid4
 
 import asyncpg
@@ -19,6 +20,7 @@ from app.canvas_history import Navigation, apply_history_command
 from app.canvas_operation_listener import (
     CanvasOperationListener,
     publish_canvas_operation,
+    publish_transient_event,
 )
 from app.canvas_protocol import (
     InvalidMessage,
@@ -31,6 +33,7 @@ from app.canvas_protocol import (
     _UndoCommand,
     _UpdateCommand,
 )
+from app.canvas_transient import CanvasTransientTransport, TransientPeer
 from app.db import get_pool
 
 logger = logging.getLogger(__name__)
@@ -58,6 +61,7 @@ def _json_value(value: object) -> object:
 
 _DEFAULT_ALLOWED_ORIGINS = frozenset({"http://localhost:5173", "http://127.0.0.1:5173"})
 _SOCKET_CLOSE_TIMEOUT = 1.0
+_CURSOR_NOTIFY_INTERVAL = 0.05
 
 
 def _allowed_origins() -> frozenset[str]:
@@ -88,6 +92,10 @@ class Connection:
     sender_task: asyncio.Task[None] | None = None
     expiry_task: asyncio.Task[None] | None = None
     detached: bool = False
+    transient_enabled: bool = False
+    cursor_publish_task: asyncio.Task[None] | None = None
+    cursor_publish_pending: bool = False
+    cursor_last_published: float = 0.0
 
 
 @dataclass
@@ -110,6 +118,7 @@ class CanvasRooms:
         queue_capacity: int = 32,
         expiry_check_interval: float = 1.0,
         listener_idle_grace: float = 5.0,
+        transient_sync_interval: float = 5.0,
     ) -> None:
         self.pool = pool
         self.allowed_origins = (
@@ -123,11 +132,27 @@ class CanvasRooms:
         self._closing = False
         self._serving: set[asyncio.Task[None]] = set()
         self._shutdown_task: asyncio.Task[None] | None = None
+        self._transient = CanvasTransientTransport(
+            process_id=str(uuid4()),
+            publish=self._publish_transient_event,
+            local_peers=self._local_transient_peers,
+            active_canvases=self._active_transient_canvases,
+            has_local_room=self._has_local_transient_room,
+            deliver=self._deliver_remote_event,
+            revoke_session=self.revoke_session,
+        )
         self._operation_listener = CanvasOperationListener(
             self._on_operation_notification,
             self._catch_up_active_rooms,
             idle_grace=listener_idle_grace,
+            on_transient=self._transient.handle_notification,
+            on_periodic=self._transient.sync_periodic,
+            sync_interval=transient_sync_interval,
         )
+
+    @property
+    def process_id(self) -> str:
+        return self._transient.process_id
 
     @staticmethod
     def _now() -> datetime:
@@ -162,7 +187,12 @@ class CanvasRooms:
     async def _expire_when_needed(self, connection: Connection, room: Room) -> None:
         while not connection.detached:
             await asyncio.sleep(self.expiry_check_interval)
-            if self._now() < connection.identity.expires_at:
+            try:
+                valid = await self._connection_access_valid(connection)
+            except Exception:
+                logger.exception("Canvas session revalidation failed")
+                valid = False
+            if valid:
                 continue
             async with room.lock:
                 if not connection.detached:
@@ -174,6 +204,14 @@ class CanvasRooms:
 
     async def _stop_delivery(self, connection: Connection) -> None:
         current = asyncio.current_task()
+        cursor_task = connection.cursor_publish_task
+        if (
+            cursor_task is not None
+            and cursor_task is not current
+            and not cursor_task.done()
+        ):
+            cursor_task.cancel()
+            await asyncio.gather(cursor_task, return_exceptions=True)
         sender = connection.sender_task
         if sender is not None and sender is not current and not sender.done():
             sender.cancel()
@@ -253,6 +291,7 @@ class CanvasRooms:
             return room
 
     async def _release_room(self, canvas_id: UUID, room: Room) -> None:
+        removed = False
         async with self._rooms_lock:
             room.leases -= 1
             if (
@@ -262,6 +301,9 @@ class CanvasRooms:
                 and self._rooms.get(canvas_id) is room
             ):
                 del self._rooms[canvas_id]
+                removed = True
+        if removed:
+            await self._transient.forget_canvas(canvas_id)
 
     async def _snapshot(
         self, conn: asyncpg.Connection, canvas_id: UUID, identity: SessionIdentity
@@ -335,6 +377,62 @@ class CanvasRooms:
             "cursor": connection.cursor,
         }
 
+    def _publish_connection_event(
+        self, connection: Connection, event_type: str
+    ) -> None:
+        if not connection.transient_enabled:
+            return
+        self._transient.publish_connection_event(
+            connection.canvas_id,
+            connection.id,
+            event_type,
+            connection.identity.user.id,
+            connection.identity.user.username,
+            connection.cursor,
+        )
+
+    async def _publish_transient_event(self, event: dict[str, object]) -> None:
+        pool = await self._db_pool()
+        async with pool.acquire() as conn:
+            await publish_transient_event(conn, event)
+
+    async def _local_transient_peers(self, canvas_id: UUID) -> list[TransientPeer]:
+        async with self._rooms_lock:
+            room = self._rooms.get(canvas_id)
+        if room is None:
+            return []
+        async with room.lock:
+            return [
+                TransientPeer(
+                    connection_id=connection.id,
+                    user_id=connection.identity.user.id,
+                    username=connection.identity.user.username,
+                    cursor=connection.cursor,
+                )
+                for connection in room.connections.values()
+                if not connection.detached
+            ]
+
+    def _active_transient_canvases(self) -> tuple[UUID, ...]:
+        return tuple(
+            canvas_id for canvas_id, room in self._rooms.items() if room.connections
+        )
+
+    def _has_local_transient_room(self, canvas_id: UUID) -> bool:
+        room = self._rooms.get(canvas_id)
+        return room is not None and bool(room.connections)
+
+    async def _deliver_remote_event(
+        self, canvas_id: UUID, message: dict[str, object]
+    ) -> None:
+        async with self._rooms_lock:
+            room = self._rooms.get(canvas_id)
+        if room is None:
+            return
+        async with room.lock:
+            self._broadcast_locked(room, message)
+        await self._close_broadcast_overflows(room)
+
     async def serve(self, socket: WebSocket, canvas_id: UUID) -> None:
         if self._closing:
             await self._close_socket(socket, 1001)
@@ -373,6 +471,7 @@ class CanvasRooms:
         try:
             await self._operation_listener.acquire()
             listener_acquired = True
+            connection.transient_enabled = True
             await socket.accept()
             async with room.lock:
                 if self._closing:
@@ -395,7 +494,8 @@ class CanvasRooms:
                         "connections": [
                             self._public_connection(item)
                             for item in room.connections.values()
-                        ],
+                        ]
+                        + await self._transient.remote_connections(canvas_id),
                     }
                 )
                 connection.outbound.put_nowait(jsonable_encoder(snapshot))
@@ -412,6 +512,8 @@ class CanvasRooms:
                     },
                     exclude=connection.id,
                 )
+                self._publish_connection_event(connection, "presence.joined")
+                self._transient.request_sync(canvas_id)
                 sender = asyncio.create_task(
                     self._guarded_send_loop(connection),
                     name=f"canvas-sender-{connection.id}",
@@ -428,9 +530,7 @@ class CanvasRooms:
             pass
         finally:
             cleanup = asyncio.create_task(
-                self._finish_connection(
-                    room, connection, registered, sender, close_code
-                )
+                self._finish_connection(room, connection, registered, close_code)
             )
             cancelled = False
             # Shutdown must await lease release even if disconnect cleanup has begun.
@@ -450,23 +550,15 @@ class CanvasRooms:
         room: Room,
         connection: Connection,
         registered: bool,
-        sender: asyncio.Task[None] | None,
         close_code: int | None,
     ) -> None:
-        if sender is not None and not sender.done():
-            sender.cancel()
-        if sender is not None:
-            await asyncio.gather(sender, return_exceptions=True)
+        await self._stop_delivery(connection)
         if registered:
             async with room.lock:
                 self._detach_locked(room, connection)
             await self._close_broadcast_overflows(room)
         async with self._rooms_lock:
             self._connections.pop(connection.id, None)
-        expiry = connection.expiry_task
-        if expiry is not None and expiry is not asyncio.current_task():
-            expiry.cancel()
-            await asyncio.gather(expiry, return_exceptions=True)
         await self._release_room(connection.canvas_id, room)
         if close_code is not None:
             await self._close_socket(connection.socket, close_code)
@@ -610,6 +702,14 @@ class CanvasRooms:
                                 },
                                 exclude=connection.id,
                             )
+                            connection.cursor_publish_pending = True
+                            if (
+                                connection.cursor_publish_task is None
+                                or connection.cursor_publish_task.done()
+                            ):
+                                connection.cursor_publish_task = asyncio.create_task(
+                                    self._publish_latest_cursor(connection)
+                                )
                     await self._close_broadcast_overflows(room)
                     if revoked:
                         await self._stop_delivery(connection)
@@ -1064,11 +1164,28 @@ class CanvasRooms:
         connection.detached = True
         removed = room.connections.pop(connection.id, None)
         if removed is not None:
+            if connection.cursor_publish_task is not None:
+                connection.cursor_publish_task.cancel()
+            if not self._closing:
+                self._publish_connection_event(connection, "presence.left")
             self._broadcast_locked(
                 room,
                 {"type": "presence.left", "connection_id": str(connection.id)},
             )
         return True
+
+    async def _publish_latest_cursor(self, connection: Connection) -> None:
+        while connection.cursor_publish_pending and not connection.detached:
+            delay = _CURSOR_NOTIFY_INTERVAL - (
+                monotonic() - connection.cursor_last_published
+            )
+            if delay > 0:
+                await asyncio.sleep(delay)
+            if connection.detached:
+                return
+            connection.cursor_publish_pending = False
+            connection.cursor_last_published = monotonic()
+            self._publish_connection_event(connection, "cursor")
 
     async def _close_slow_connection(self, connection: Connection) -> None:
         await self._stop_delivery(connection)
@@ -1106,6 +1223,7 @@ class CanvasRooms:
             task.cancel()
         await asyncio.gather(*serving, return_exceptions=True)
         await self._operation_listener.close()
+        await self._transient.close()
         async with self._rooms_lock:
             rooms = list(self._rooms.items())
         connections: list[Connection] = []

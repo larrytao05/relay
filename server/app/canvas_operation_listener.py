@@ -9,6 +9,8 @@ from app.db import get_listener_database_url
 
 logger = logging.getLogger(__name__)
 _CHANNEL = "canvas_operations"
+_TRANSIENT_CHANNEL = "canvas_transient"
+_MAX_NOTIFY_BYTES = 7900
 
 
 async def publish_canvas_operation(
@@ -20,15 +22,34 @@ async def publish_canvas_operation(
     await conn.execute("SELECT pg_notify($1, $2)", _CHANNEL, payload)
 
 
+async def publish_transient_event(
+    conn: asyncpg.Connection, event: dict[str, object]
+) -> None:
+    payload = json.dumps(event, separators=(",", ":"))
+    if len(payload.encode("utf-8")) > _MAX_NOTIFY_BYTES:
+        raise ValueError("Transient notification exceeds the PostgreSQL payload limit")
+    await conn.execute(
+        "SELECT pg_notify($1, $2)",
+        _TRANSIENT_CHANNEL,
+        payload,
+    )
+
+
 class CanvasOperationListener:
     def __init__(
         self,
         on_notification: Callable[[str], Awaitable[None]],
         on_reconnect: Callable[[], Awaitable[None]],
         idle_grace: float = 5.0,
+        on_transient: Callable[[str], Awaitable[None]] | None = None,
+        on_periodic: Callable[[], Awaitable[None]] | None = None,
+        sync_interval: float = 5.0,
     ) -> None:
         self._on_notification = on_notification
         self._on_reconnect = on_reconnect
+        self._on_transient = on_transient
+        self._on_periodic = on_periodic
+        self._sync_interval = sync_interval
         self._idle_grace = idle_grace
         self._lock = asyncio.Lock()
         self._users = 0
@@ -37,6 +58,10 @@ class CanvasOperationListener:
         self._runner: asyncio.Task[None] | None = None
         self._idle_task: asyncio.Task[None] | None = None
         self._callback_tasks: set[asyncio.Task[None]] = set()
+
+    @property
+    def active(self) -> bool:
+        return self._users > 0
 
     async def acquire(self) -> None:
         async with self._lock:
@@ -91,10 +116,23 @@ class CanvasOperationListener:
 
                 conn.add_termination_listener(terminated)
                 await conn.add_listener(_CHANNEL, notify)
+                if self._on_transient is not None:
+
+                    def transient_notify(_conn, _pid, _channel, payload):
+                        task = asyncio.create_task(self._dispatch_transient(payload))
+                        self._callback_tasks.add(task)
+                        task.add_done_callback(self._callback_tasks.discard)
+
+                    await conn.add_listener(_TRANSIENT_CHANNEL, transient_notify)
                 self._connected.set()
                 delay = 0.1
                 await self._on_reconnect()
-                await disconnected.wait()
+                while not disconnected.is_set():
+                    try:
+                        await asyncio.wait_for(disconnected.wait(), self._sync_interval)
+                    except TimeoutError:
+                        if self._on_periodic is not None:
+                            await self._on_periodic()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -112,6 +150,13 @@ class CanvasOperationListener:
             await self._on_notification(payload)
         except Exception:
             logger.exception("Canvas operation notification handling failed")
+
+    async def _dispatch_transient(self, payload: str) -> None:
+        try:
+            if self._on_transient is not None:
+                await self._on_transient(payload)
+        except Exception:
+            logger.exception("Canvas transient notification handling failed")
 
     async def close(self) -> None:
         async with self._lock:

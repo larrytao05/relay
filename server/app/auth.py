@@ -1,20 +1,23 @@
 import base64
 import hashlib
 import hmac
+import logging
 import os
 import re
 import secrets
 from datetime import timedelta
 from typing import Annotated, Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from asyncpg import LockNotAvailableError, UniqueViolationError
 from fastapi import APIRouter, Cookie, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, field_validator
 
+from app.canvas_operation_listener import publish_transient_event
 from app.db import get_pool
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+logger = logging.getLogger(__name__)
 
 SESSION_COOKIE_NAME = "session"
 SESSION_LIFETIME = timedelta(days=14)
@@ -212,6 +215,7 @@ async def logout(
     if session_token:
         token_hash = hash_session_token(session_token)
         pool = await get_pool()
+        rooms = getattr(request.app.state, "canvas_rooms", None)
         try:
             async with pool.acquire() as conn, conn.transaction():
                 await conn.fetchval(
@@ -222,14 +226,27 @@ async def logout(
                     "DELETE FROM auth_session WHERE token_hash = $1",
                     token_hash,
                 )
+                if rooms is not None:
+                    await publish_transient_event(
+                        conn,
+                        {
+                            "type": "session.revoked",
+                            "process_id": rooms.process_id,
+                            "event_id": str(uuid4()),
+                            "canvas_id": str(UUID(int=0)),
+                            "token_hash": token_hash,
+                        },
+                    )
         except LockNotAvailableError as exc:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Logout could not be completed. Please try again.",
             ) from exc
-        rooms = getattr(request.app.state, "canvas_rooms", None)
         if rooms is not None:
-            await rooms.revoke_session(token_hash)
+            try:
+                await rooms.revoke_session(token_hash)
+            except Exception:
+                logger.exception("Local WebSocket revocation failed after logout")
     response.delete_cookie(
         key=SESSION_COOKIE_NAME,
         httponly=True,

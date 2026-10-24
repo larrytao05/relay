@@ -17,6 +17,7 @@ import test_canvas_create as create_helpers
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
+from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect as websocket_connect
 
 from app.auth import PublicUser
@@ -40,6 +41,7 @@ class CanvasOperationListenerTests(unittest.IsolatedAsyncioTestCase):
             lambda _payload: asyncio.sleep(0),
             lambda: _set(connected),
             idle_grace=0.01,
+            on_transient=lambda _payload: asyncio.sleep(0),
         )
         with patch(
             "app.canvas_operation_listener.asyncpg.connect", return_value=connection
@@ -47,6 +49,10 @@ class CanvasOperationListenerTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(listener.acquire(), listener.acquire())
             self.assertEqual(connect.await_count, 1)
             self.assertTrue(connected.is_set())
+            self.assertEqual(
+                set(connection._listeners),
+                {"canvas_operations", "canvas_transient"},
+            )
 
             await listener.release()
             await listener.release()
@@ -81,7 +87,10 @@ class CanvasOperationListenerTests(unittest.IsolatedAsyncioTestCase):
         connection = _ListenerConnection()
         received = asyncio.Queue()
         listener = CanvasOperationListener(
-            received.put, lambda: asyncio.sleep(0), idle_grace=1
+            received.put,
+            lambda: asyncio.sleep(0),
+            idle_grace=1,
+            on_transient=received.put,
         )
         with patch(
             "app.canvas_operation_listener.asyncpg.connect", return_value=connection
@@ -91,6 +100,11 @@ class CanvasOperationListenerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 await asyncio.wait_for(received.get(), timeout=1),
                 '{"canvas_id":"canvas","revision":2}',
+            )
+            connection.notify('{"type":"presence.left"}', "canvas_transient")
+            self.assertEqual(
+                await asyncio.wait_for(received.get(), timeout=1),
+                '{"type":"presence.left"}',
             )
             await listener.close()
 
@@ -211,19 +225,19 @@ class _ListenerConnection:
     def __init__(self):
         self.closed = asyncio.Event()
         self.ready = asyncio.Event()
-        self._listener = None
+        self._listeners = {}
         self._terminated = None
         self._closed = False
 
     def add_termination_listener(self, callback):
         self._terminated = callback
 
-    async def add_listener(self, _channel, callback):
-        self._listener = callback
+    async def add_listener(self, channel, callback):
+        self._listeners[channel] = callback
         self.ready.set()
 
-    def notify(self, payload):
-        self._listener(self, 1, "canvas_operations", payload)
+    def notify(self, payload, channel="canvas_operations"):
+        self._listeners[channel](self, 1, channel, payload)
 
     def terminate(self):
         self._closed = True
@@ -317,6 +331,57 @@ class CanvasCrossInstancePostgresTests(unittest.TestCase):
                     self.assertEqual(
                         [event["canvas_revision"] for event in events_a], [1, 2]
                     )
+            finally:
+                _stop_backend(process_a)
+                _stop_backend(process_b)
+
+    def test_two_backend_processes_converge_presence_cursor_and_logout(self):
+        with create_helpers.CanvasCreatePostgresTests()._board() as board:
+            process_a, url_a = _start_backend(board["url"])
+            process_b, url_b = _start_backend(board["url"])
+            try:
+                _wait_for_backend(process_a, url_a)
+                _wait_for_backend(process_b, url_b)
+                headers = {
+                    "origin": "http://localhost:5173",
+                    "additional_headers": {"Cookie": f"session={board['token_a']}"},
+                }
+                with websocket_connect(
+                    _websocket_url(url_a, board["canvas_id"]), **headers
+                ) as socket_a:
+                    snapshot_a = _receive_process_json(socket_a)
+                    connection_a = snapshot_a["connection_id"]
+                    with websocket_connect(
+                        _websocket_url(url_b, board["canvas_id"]), **headers
+                    ) as socket_b:
+                        snapshot_b = _receive_process_json(socket_b)
+                        self.assertNotIn(
+                            connection_a,
+                            {
+                                peer["connection_id"]
+                                for peer in snapshot_b["connections"]
+                            },
+                        )
+                        _receive_until(socket_b, "presence.joined", connection_a)
+
+                        socket_a.send(
+                            json.dumps(
+                                {"type": "cursor", "position": {"x": 11, "y": 19}}
+                            )
+                        )
+                        cursor = _receive_until(socket_b, "cursor", connection_a)
+                        self.assertEqual(cursor["position"], {"x": 11.0, "y": 19.0})
+
+                        request = Request(
+                            f"{url_a}/api/auth/logout",
+                            data=b"",
+                            headers={"Cookie": f"session={board['token_a']}"},
+                            method="POST",
+                        )
+                        with urlopen(request, timeout=5) as response:
+                            self.assertEqual(response.status, 204)
+                        _expect_process_socket_closed(socket_a)
+                        _expect_process_socket_closed(socket_b)
             finally:
                 _stop_backend(process_a)
                 _stop_backend(process_b)
@@ -479,6 +544,28 @@ def _websocket_url(base_url, canvas_id):
 
 def _receive_process_json(websocket):
     return json.loads(websocket.recv(timeout=5))
+
+
+def _receive_until(websocket, event_type, connection_id):
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        event = _receive_process_json(websocket)
+        if (
+            event.get("type") == event_type
+            and event.get("connection_id") == connection_id
+        ):
+            return event
+    raise AssertionError(f"did not receive {event_type} for {connection_id}")
+
+
+def _expect_process_socket_closed(websocket):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            websocket.recv(timeout=max(0.1, deadline - time.monotonic()))
+        except ConnectionClosed:
+            return
+    raise AssertionError("websocket remained open after exact-session logout")
 
 
 def _receive_process_operations(websocket, count):

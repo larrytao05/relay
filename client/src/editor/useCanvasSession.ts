@@ -6,6 +6,7 @@ import { isTextWithinLimit, TEXT_LENGTH_ERROR_MESSAGE } from "./text.ts";
 import { initialEditorState, type DurableCommand, type EditorState, type OptimisticIntent, type Point, type ServerEvent } from "./types.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const OPERATION_ACK_TIMEOUT_MS = 10_000;
 
 type SessionAction = EditorAction | { type: "session.reset" };
 
@@ -19,12 +20,26 @@ export function useCanvasSession(canvasId: string | undefined) {
   stateRef.current = state;
   const socketRef = useRef<WebSocket | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const acknowledgmentTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const generationRef = useRef(0);
   const cancelledRef = useRef(false);
   const pendingGuard = useRef(false);
   const retryAttempt = useRef(0);
   const activeCanvasId = useRef<string | undefined>(canvasId);
   const cursorRef = useRef<{ point: Point | null; timer: ReturnType<typeof setTimeout> | null; sentAt: number }>({ point: null, timer: null, sentAt: 0 });
+  const clearAcknowledgmentTimer = useCallback(() => {
+    if (acknowledgmentTimerRef.current) clearTimeout(acknowledgmentTimerRef.current);
+    acknowledgmentTimerRef.current = null;
+  }, []);
+  const startAcknowledgmentTimer = useCallback((socket: WebSocket, operationId: string) => {
+    clearAcknowledgmentTimer();
+    acknowledgmentTimerRef.current = setTimeout(() => {
+      acknowledgmentTimerRef.current = null;
+      if (socketRef.current === socket && stateRef.current.pending?.command.operation_id === operationId) {
+        socket.close(4005, "Operation acknowledgment timed out");
+      }
+    }, OPERATION_ACK_TIMEOUT_MS);
+  }, [clearAcknowledgmentTimer]);
 
   useEffect(() => {
     cancelledRef.current = false;
@@ -75,6 +90,7 @@ export function useCanvasSession(canvasId: string | undefined) {
           if (activeCanvasId.current === event.canvas.id && current.canvas?.id === event.canvas.id && current.recovery === "retry-command" && current.pending) {
             try {
               socket.send(current.pending.wire);
+              startAcknowledgmentTimer(socket, current.pending.command.operation_id);
               dispatch({ type: "pending.retried" });
             } catch {
               socket.close();
@@ -93,6 +109,7 @@ export function useCanvasSession(canvasId: string | undefined) {
         const settlesPending = event.type === "operation.applied"
           ? current.pending?.command.operation_id === event.operation_id
           : event.type === "error" && event.operation_id !== undefined && current.pending?.command.operation_id === event.operation_id;
+        if (settlesPending) clearAcknowledgmentTimer();
         const recoveryReplaySettled = settlesPending && current.pending?.recoveryReplay;
         dispatch({ type: "event", event });
         if (settlesPending) pendingGuard.current = false;
@@ -102,6 +119,7 @@ export function useCanvasSession(canvasId: string | undefined) {
 
       socket.onclose = (event) => {
         if (generation !== generationRef.current) return;
+        clearAcknowledgmentTimer();
         socketRef.current = null;
         if (cancelledRef.current) return;
         if (protocolFailure) return;
@@ -129,11 +147,12 @@ export function useCanvasSession(canvasId: string | undefined) {
       pendingGuard.current = false;
       generationRef.current += 1;
       if (timerRef.current) clearTimeout(timerRef.current);
+      clearAcknowledgmentTimer();
       if (cursorRef.current.timer) clearTimeout(cursorRef.current.timer);
       socketRef.current?.close(1000, "Canvas editor closed");
       socketRef.current = null;
     };
-  }, [canvasId]);
+  }, [canvasId, clearAcknowledgmentTimer, startAcknowledgmentTimer]);
 
   const sendOperation = useCallback((command: DurableCommand, optimistic: OptimisticIntent | null = null): boolean => {
     const socket = socketRef.current;
@@ -157,6 +176,7 @@ export function useCanvasSession(canvasId: string | undefined) {
     dispatch({ type: "pending", command: { command, wire, recoveryReplay: false }, optimistic });
     try {
       socket.send(wire);
+      startAcknowledgmentTimer(socket, command.operation_id);
       return true;
     } catch {
       pendingGuard.current = false;

@@ -4,7 +4,7 @@ Implementation is broken into eight tickets in [WEBSOCKET_TICKETS.md](WEBSOCKET_
 
 ## Problem
 
-The original `/ws` placeholder has been replaced by `/ws/canvases/{canvas_id}`. The backend already has cookie sessions, canvas membership, an asyncpg pool, and tables for shapes and operations. The WebSocket needs one ordering rule across snapshot delivery, edits, and presence. The server targets one Uvicorn worker and 2–5 collaborators per canvas.
+The original `/ws` placeholder has been replaced by `/ws/canvases/{canvas_id}`. The backend already has cookie sessions, canvas membership, an asyncpg pool, and tables for shapes and operations. The WebSocket needs one ordering rule across snapshot delivery, edits, and presence. The target workload is 2–5 collaborators per canvas.
 
 ## Usage
 
@@ -62,7 +62,7 @@ Each room owns one lock. Snapshot loading and connection registration happen und
 
 Connection state is keyed by `connection_id`, not user ID. Each tab therefore has its own cursor and undo/redo navigation. Room state is transient. PostgreSQL remains authoritative for shapes and operation history.
 
-Authentication uses the existing session cookie and session lookup. The socket checks the configured `Origin`, session, and canvas membership before acceptance. Commands recheck session validity and membership. Logout closes all sockets for that session. One owned expiry task per connection checks the recorded expiry every second against an injectable clock, then detaches and closes an expired socket with `1008`. Cleanup cancels and awaits that task.
+Authentication uses the existing session cookie and session lookup. The socket checks the configured `Origin`, session, and canvas membership before acceptance. Commands and an owned periodic task recheck session validity and membership. Logout publishes an exact-session revocation in the session-deletion transaction, then closes local sockets synchronously after commit; remote closure is prompt but eventual, with periodic revalidation repairing missed notifications. Expired or invalid sessions detach and close with `1008`. Cleanup cancels and awaits the task.
 
 ## Persistence change
 
@@ -85,12 +85,12 @@ Operation IDs are globally unique. Handle a concurrent unique-key collision by r
 
 Candidate A's cohesive room owner is the base. It scored better on ordering ownership, session revocation, retry semantics, and interface depth. Candidate B's split modules would make the route coordinate locking, commands, and event delivery. Pure validation lives in `canvas_protocol.py`; history inverses and navigation live in `canvas_history.py`. Room admission, commit ordering, and delivery remain owned by `CanvasRooms`.
 
-The independent cross-judge also recommended A. It identified two corrections included here: persist immutable request/result data for idempotent retries, and handle global operation-ID collisions across canvases. The judge also recommended one Uvicorn worker because in-memory rooms cannot coordinate across processes.
+The independent cross-judge also recommended A. It identified two corrections included here: persist immutable request/result data for idempotent retries, and handle global operation-ID collisions across canvases. At that point, the single-process room owner required one Uvicorn worker; transient notifications now relay presence between process-local rooms.
 
 ## Tradeoffs accepted
 
 - The collaboration module owns transport lifecycle and command orchestration. This keeps ordering rules in one place, at the cost of a larger module.
-- One Uvicorn worker owns room locks and broadcasts. PostgreSQL row locks alone cannot synchronize snapshots or presence across workers.
+- Each process owns its room locks and local sockets. PostgreSQL notifications carry committed operation wake-ups and transient presence, cursor, and session-revocation events. `canvas_transient.py` owns remote peer cache, protocol validation, versions, deduplication, per-peer sync, and TTL expiry; sync merges peers and TTL removes unrefreshed entries.
 - Undo uses connection-scoped navigation and conservative shape-level conflict checks. Property-level undo remains out of scope.
 - Slow peers reconnect after queue overflow. The server does not let a blocked socket hold a room lock.
 
@@ -98,7 +98,7 @@ The independent cross-judge also recommended A. It identified two corrections in
 
 Separate `canvas_ws.py`, `realtime.py`, and `canvas_commands.py` modules. This makes each file smaller but exposes callback coordination across snapshot loading, locking, persistence, and broadcast. Keep this option for later if command code grows enough to sit behind one complete `apply` boundary.
 
-An actor task and mailbox per canvas. This gives each canvas one writer, but adds task startup, cancellation, and request/reply lifecycle rules. A room lock and sender queue cover the current single-process workload with less machinery.
+An actor task and mailbox per canvas. This gives each process-local canvas room one writer, but adds task startup, cancellation, and request/reply lifecycle rules. A room lock and sender queue cover local ordering with less machinery.
 
 ## Implementation reconciliation
 
@@ -106,7 +106,7 @@ WS-01 implements private command models, parsing, shape validation, and patch me
 
 ## Open questions and risks
 
-- Deployment must use one Uvicorn worker until cross-process delivery is implemented. See the [cross-instance collaboration plan](CROSS_INSTANCE_PLAN.md) for the listener lifecycle, operation catch-up, and multi-process acceptance checks.
+- Multi-process deployment requires a direct PostgreSQL listener endpoint and available connections for each process with local sockets. See the [cross-instance collaboration plan](CROSS_INSTANCE_PLAN.md) for lifecycle and validation details.
 - Operation request/result records must remain available as long as retries are accepted. If operation history is pruned, the retry window needs an explicit limit.
 
 ## Verification status

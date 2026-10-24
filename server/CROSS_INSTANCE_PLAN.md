@@ -7,7 +7,7 @@ Allow collaborators connected to different FastAPI processes to see the same com
 ## Current constraints
 
 - `CanvasRooms` keeps WebSocket connections, locks, presence, and cursors in process memory.
-- The current deployment assumes one Uvicorn worker. Multiple workers do not share rooms or broadcasts.
+- Each Uvicorn process owns its local rooms and broadcasts; PostgreSQL carries committed operation wake-ups and transient collaboration events between processes.
 - Shape commands update PostgreSQL transactionally, then broadcast to connections owned by that process.
 - The first WebSocket message is a snapshot. Existing in-process room locking orders that snapshot with later local events.
 - Presence and cursor state is intentionally transient and is not written to PostgreSQL.
@@ -26,6 +26,12 @@ On WebSocket admission, establish the listener before reading the canvas snapsho
 
 Use transient PostgreSQL notifications for presence joins, leaves, and session revocations. Include a source process ID and event ID so a process can ignore its own notification echo and consumers can deduplicate transient events. Keep cursor updates out of durable tables. Throttle cursor notifications and validate the expected two-to-five collaborator workload before adding a separate pub/sub service.
 
+Transient collaboration uses a second channel on the existing per-process listener. Each process keeps remote connections in an in-memory cache separate from its locally owned sockets. Notifications carry a process-incarnation ID, event ID, and per-connection version; receivers ignore self echoes, deduplicate events, and reject stale versions. A joining socket receives its local snapshot first, then remote presence learned from a bounded sync request/reply. Since there is no durable process roster or presence store, the first snapshot is complete only for local and already-known remote connections; remote presence converges afterward. Sync sends one peer per notification, with a separate empty-state event when there are no peers, keeping each payload under PostgreSQL's notification limit. Sync is merge plus TTL: reported peers refresh or add remote cache entries, omitted peers remain until a leave event or TTL expiry. Periodic per-peer sync and receiver-side TTL expiry repair missed notifications, listener reconnects, and process crashes. The room lock continues to order messages delivered to local sockets, and sync waits must not hold a lock needed by the listener callback.
+
+Logout publishes an exact-session revocation in the same PostgreSQL transaction as deleting the session; PostgreSQL delivers the notification only after commit. After the transaction exits, the logging-out process stops local delivery synchronously before returning. Remote socket revocation is prompt but eventual: listeners detach matching sockets on receipt, and periodic session revalidation bounds recovery when a notification is missed. Durable writes remain strictly ordered against logout by the existing session-row locks. Do not claim globally synchronous remote socket closure without an acknowledgement and owner-discovery protocol.
+
+The alternative of storing latest presence and cursors in PostgreSQL, including `UNLOGGED` tables, is rejected for this ticket: it changes the explicit in-memory-only boundary and adds lease renewal, cleanup, and database-recovery rules. PostgreSQL remains the transport for transient events, not their state store.
+
 ## Implementation sequence
 
 1. **Confirm deployment prerequisites.** Verify that the chosen app runtime supports the project's long-lived WebSocket connections and that its network can reach a direct PostgreSQL endpoint. Keep the database on PostgreSQL 16. Record connection and compute limits for the selected provider.
@@ -41,7 +47,7 @@ Use transient PostgreSQL notifications for presence joins, leaves, and session r
 - Two collaborators connected to different backend processes see each committed operation once and in canvas revision order.
 - A collaborator joining during an edit receives a consistent snapshot followed by every later committed operation.
 - A disconnected listener catches up from the journal without losing durable edits.
-- Presence, cursor updates, and exact-session logout reach the other active processes without making transient state durable.
+- Presence, cursor updates, and exact-session logout converge across active processes without making transient state durable. Local logout remains synchronous; remote logout is eventual and bounded by session revalidation when notifications are missed.
 - A process with no local WebSocket connections closes its listener after the idle grace period.
 - The deployment can run more than one backend process without relying on shared in-process memory.
 
@@ -55,4 +61,4 @@ Use transient PostgreSQL notifications for presence joins, leaves, and session r
 
 ## Existing work
 
-Validation, snapshot consistency, and logout/write ordering were completed in commit `4692013` (`Fix collaboration validation, snapshots, and logout ordering`). The current WebSocket implementation and its one-process assumptions are documented in [WEBSOCKET_DESIGN.md](WEBSOCKET_DESIGN.md). This plan covers the remaining cross-process work; it does not change code or deploy infrastructure.
+Validation, snapshot consistency, and logout/write ordering were completed in commit `4692013` (`Fix collaboration validation, snapshots, and logout ordering`). The listener lifecycle and cross-process presence implementation are documented in [WEBSOCKET_DESIGN.md](WEBSOCKET_DESIGN.md) and [WEBSOCKET_CONNECTIONS.md](WEBSOCKET_CONNECTIONS.md). Multi-process deployment still depends on a direct PostgreSQL listener endpoint and the multi-process acceptance checks in this plan.

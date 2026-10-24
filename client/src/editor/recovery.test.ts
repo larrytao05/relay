@@ -13,6 +13,7 @@ test("protocol and policy closes are terminal while transport and recovery close
   assert.equal(shouldRetrySocketClose(1013), true);
   assert.equal(shouldRetrySocketClose(4003), true);
   assert.equal(shouldRetrySocketClose(4004), true);
+  assert.equal(shouldRetrySocketClose(4005), true);
   assert.equal(shouldRetrySocketClose(4002), false);
   assert.equal(shouldRetrySocketClose(1008), false);
 });
