@@ -7,6 +7,11 @@ DATABASE_URL = os.environ.get(
     "postgres://whiteboard:whiteboard@localhost:5432/whiteboard",
 )
 
+
+def get_listener_database_url() -> str:
+    return os.environ.get("DATABASE_LISTENER_URL", DATABASE_URL)
+
+
 pool: asyncpg.Pool | None = None
 
 

@@ -106,7 +106,7 @@ WS-01 implements private command models, parsing, shape validation, and patch me
 
 ## Open questions and risks
 
-- Deployment must use one Uvicorn worker. Multiple workers need cross-process pub/sub and coordinated snapshot subscription.
+- Deployment must use one Uvicorn worker until cross-process delivery is implemented. See the [cross-instance collaboration plan](CROSS_INSTANCE_PLAN.md) for the listener lifecycle, operation catch-up, and multi-process acceptance checks.
 - Operation request/result records must remain available as long as retries are accepted. If operation history is pruned, the retry window needs an explicit limit.
 
 ## Verification status

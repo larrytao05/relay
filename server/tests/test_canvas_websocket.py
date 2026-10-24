@@ -487,10 +487,17 @@ class CanvasRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
         joining_socket = _DisconnectingSocket()
         with (
             patch.object(rooms, "_authenticate", AsyncMock(return_value=identity)),
-            patch.object(rooms, "_snapshot", AsyncMock(return_value={"shapes": []})),
+            patch.object(
+                rooms,
+                "_snapshot",
+                AsyncMock(return_value={"shapes": [], "canvas_revision": 0}),
+            ),
             patch.object(
                 rooms, "_connection_access_valid", AsyncMock(return_value=True)
             ),
+            patch.object(rooms, "_operation_rows", AsyncMock(return_value=[])),
+            patch.object(rooms._operation_listener, "acquire", AsyncMock()),
+            patch.object(rooms._operation_listener, "release", AsyncMock()),
         ):
             serving = asyncio.create_task(rooms.serve(joining_socket, canvas_id))
             try:
@@ -630,10 +637,17 @@ class CanvasRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
         )
         with (
             patch.object(rooms, "_authenticate", AsyncMock(return_value=identity)),
-            patch.object(rooms, "_snapshot", AsyncMock(return_value={"shapes": []})),
+            patch.object(
+                rooms,
+                "_snapshot",
+                AsyncMock(return_value={"shapes": [], "canvas_revision": 0}),
+            ),
             patch.object(
                 rooms, "_connection_access_valid", AsyncMock(return_value=True)
             ),
+            patch.object(rooms, "_operation_rows", AsyncMock(return_value=[])),
+            patch.object(rooms._operation_listener, "acquire", AsyncMock()),
+            patch.object(rooms._operation_listener, "release", AsyncMock()),
         ):
             serving = asyncio.create_task(rooms.serve(socket, canvas_id))
             room = None
@@ -670,7 +684,11 @@ class CanvasRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
         identity = SessionIdentity(
             "digest", PublicUser(id=uuid4(), username="tester"), datetime.now(UTC)
         )
-        with patch.object(rooms, "_authenticate", AsyncMock(return_value=identity)):
+        with (
+            patch.object(rooms, "_authenticate", AsyncMock(return_value=identity)),
+            patch.object(rooms._operation_listener, "acquire", AsyncMock()),
+            patch.object(rooms._operation_listener, "release", AsyncMock()),
+        ):
             serving = asyncio.create_task(rooms.serve(socket, uuid4()))
             try:
                 await asyncio.wait_for(socket.accept_started.wait(), timeout=1)
@@ -692,7 +710,11 @@ class CanvasRoomLifecycleTests(unittest.IsolatedAsyncioTestCase):
         identity = SessionIdentity(
             "digest", PublicUser(id=uuid4(), username="tester"), datetime.now(UTC)
         )
-        with patch.object(rooms, "_authenticate", AsyncMock(return_value=identity)):
+        with (
+            patch.object(rooms, "_authenticate", AsyncMock(return_value=identity)),
+            patch.object(rooms._operation_listener, "acquire", AsyncMock()),
+            patch.object(rooms._operation_listener, "release", AsyncMock()),
+        ):
             serving = asyncio.create_task(rooms.serve(socket, uuid4()))
             try:
                 await asyncio.wait_for(socket.accept_started.wait(), timeout=1)

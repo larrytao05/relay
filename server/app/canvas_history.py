@@ -9,6 +9,7 @@ from uuid import UUID
 import asyncpg
 
 from app.canvas_access import lock_canvas_write_access
+from app.canvas_operation_listener import publish_canvas_operation
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +251,7 @@ async def apply_history_command(
                     json.dumps(result),
                     target_id,
                 )
+                await publish_canvas_operation(conn, connection.canvas_id, revision)
                 return result, True
     except asyncpg.UniqueViolationError:
         saved = await collision(pool, operation_id, request)

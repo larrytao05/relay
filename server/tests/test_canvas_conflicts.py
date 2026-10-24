@@ -82,7 +82,11 @@ class PropertyMergeHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["shape"]["revision"], 3)
         self.assertEqual(result["shape"]["properties"]["color"], "#abcdef")
         self.assertEqual(result["shape"]["properties"]["x"], 77)
-        journal = conn.execute.await_args_list[-1].args
+        journal = next(
+            call.args
+            for call in conn.execute.await_args_list
+            if "INSERT INTO canvas_operation" in call.args[0]
+        )
         self.assertEqual(json.loads(journal[7]), {"x": 10})
         self.assertEqual(json.loads(journal[8]), {"x": 77})
         self.assertEqual(json.loads(journal[10]), result)

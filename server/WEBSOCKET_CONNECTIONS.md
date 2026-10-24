@@ -13,13 +13,25 @@ WEBSOCKET_ALLOWED_ORIGINS=https://whiteboard.example.com
 
 An absent or unlisted origin is rejected before a snapshot is loaded. The list does not support wildcard matching.
 
-Run the server with one Uvicorn worker:
+The durable operation listener uses a dedicated PostgreSQL session while a
+process has active WebSocket connections. Set `DATABASE_LISTENER_URL` to the
+direct PostgreSQL endpoint when `DATABASE_URL` uses a transaction pooler. It
+defaults to `DATABASE_URL`.
+
+Durable edits are journaled and can be delivered between processes. Presence,
+cursors, and logout revocation still use process-local state, so keep one
+Uvicorn worker until those cross-process paths are implemented and verified:
 
 ```sh
 uvicorn app.main:app --host 0.0.0.0 --port 3001 --workers 1
 ```
 
-Room locks and connection state live in process memory. Multiple workers would have separate room owners and could send inconsistent snapshots or miss broadcasts. A multi-worker deployment needs shared coordination before increasing the worker count.
+Room locks, presence, cursors, and session revocation live in process memory.
+Multiple workers still need shared coordination for those transient events.
+Durable operation notifications are only wake-ups; the operation journal
+remains authoritative, and each process catches up by canvas revision after
+notifications and listener reconnects. The listener closes after the last
+local socket leaves and a short idle grace period expires.
 
 Shutdown cancels and awaits in-flight connection handlers and senders. Socket-close attempts run independently and time out after one second so a blocked transport cannot stall other peers. A cancelled handshake releases its room lease.
 

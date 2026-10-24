@@ -16,6 +16,10 @@ from app.auth import PublicUser, hash_session_token
 from app.canvas_access import lock_canvas_write_access
 from app.canvas_conflicts import can_merge_update
 from app.canvas_history import Navigation, apply_history_command
+from app.canvas_operation_listener import (
+    CanvasOperationListener,
+    publish_canvas_operation,
+)
 from app.canvas_protocol import (
     InvalidMessage,
     _CreateCommand,
@@ -30,6 +34,7 @@ from app.canvas_protocol import (
 from app.db import get_pool
 
 logger = logging.getLogger(__name__)
+_OPERATION_REPLAY_BATCH = 100
 
 
 class _ShapeIdConflict(Exception):
@@ -92,6 +97,7 @@ class Room:
     leases: int = 0
     operation_origins: dict[UUID, UUID] = field(default_factory=dict)
     broadcast_overflows: dict[UUID, Connection] = field(default_factory=dict)
+    revision: int | None = None
 
 
 class CanvasRooms:
@@ -103,6 +109,7 @@ class CanvasRooms:
         allowed_origins: frozenset[str] | None = None,
         queue_capacity: int = 32,
         expiry_check_interval: float = 1.0,
+        listener_idle_grace: float = 5.0,
     ) -> None:
         self.pool = pool
         self.allowed_origins = (
@@ -116,6 +123,11 @@ class CanvasRooms:
         self._closing = False
         self._serving: set[asyncio.Task[None]] = set()
         self._shutdown_task: asyncio.Task[None] | None = None
+        self._operation_listener = CanvasOperationListener(
+            self._on_operation_notification,
+            self._catch_up_active_rooms,
+            idle_grace=listener_idle_grace,
+        )
 
     @staticmethod
     def _now() -> datetime:
@@ -355,9 +367,12 @@ class CanvasRooms:
             outbound=asyncio.Queue(maxsize=self.queue_capacity),
         )
         registered = False
+        listener_acquired = False
         sender: asyncio.Task[None] | None = None
         close_code: int | None = None
         try:
+            await self._operation_listener.acquire()
+            listener_acquired = True
             await socket.accept()
             async with room.lock:
                 if self._closing:
@@ -384,6 +399,7 @@ class CanvasRooms:
                     }
                 )
                 connection.outbound.put_nowait(jsonable_encoder(snapshot))
+                await self._catch_up_admission(room, connection, snapshot)
                 self._broadcast_locked(
                     room,
                     {
@@ -424,6 +440,8 @@ class CanvasRooms:
                 except asyncio.CancelledError:
                     cancelled = True
             await cleanup
+            if listener_acquired:
+                await self._operation_listener.release()
             if cancelled:
                 raise asyncio.CancelledError
 
@@ -457,6 +475,86 @@ class CanvasRooms:
         while True:
             message = await connection.outbound.get()
             await connection.socket.send_json(message)
+
+    async def _operation_rows(
+        self, canvas_id: UUID, after_revision: int
+    ) -> list[asyncpg.Record]:
+        pool = await self._db_pool()
+        async with pool.acquire() as conn:
+            return await conn.fetch(
+                """SELECT canvas_revision, result FROM canvas_operation
+                   WHERE canvas_id=$1 AND canvas_revision>$2
+                   ORDER BY canvas_revision LIMIT $3""",
+                canvas_id,
+                after_revision,
+                _OPERATION_REPLAY_BATCH,
+            )
+
+    async def _catch_up_admission(
+        self,
+        room: Room,
+        connection: Connection,
+        snapshot: dict[str, object],
+    ) -> None:
+        snapshot_revision = int(snapshot["canvas_revision"])
+        if room.revision is None:
+            room.revision = snapshot_revision
+        replayed_revision = min(room.revision, snapshot_revision)
+        while True:
+            rows = await self._operation_rows(connection.canvas_id, replayed_revision)
+            for row in rows:
+                revision = row["canvas_revision"]
+                event = _json_value(row["result"])
+                if revision > room.revision:
+                    for peer in tuple(room.connections.values()):
+                        if peer is connection and revision <= snapshot_revision:
+                            continue
+                        if isinstance(event, dict):
+                            self._enqueue_operation_locked(room, peer, event)
+                    room.revision = revision
+                elif revision > snapshot_revision and isinstance(event, dict):
+                    self._enqueue_operation_locked(room, connection, event)
+                replayed_revision = revision
+            if len(rows) < _OPERATION_REPLAY_BATCH:
+                return
+
+    async def _catch_up_room(self, canvas_id: UUID, room: Room) -> None:
+        if room.revision is None:
+            return
+        while True:
+            rows = await self._operation_rows(canvas_id, room.revision)
+            for row in rows:
+                event = _json_value(row["result"])
+                if isinstance(event, dict):
+                    for peer in tuple(room.connections.values()):
+                        self._enqueue_operation_locked(room, peer, event)
+                room.revision = row["canvas_revision"]
+            if len(rows) < _OPERATION_REPLAY_BATCH:
+                return
+
+    async def _on_operation_notification(self, payload: str) -> None:
+        try:
+            notification = json.loads(payload)
+            canvas_id = UUID(notification["canvas_id"])
+            int(notification["revision"])
+        except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+            logger.warning("Ignoring malformed canvas operation notification")
+            return
+        async with self._rooms_lock:
+            room = self._rooms.get(canvas_id)
+        if room is None:
+            return
+        async with room.lock:
+            await self._catch_up_room(canvas_id, room)
+        await self._close_broadcast_overflows(room)
+
+    async def _catch_up_active_rooms(self) -> None:
+        async with self._rooms_lock:
+            rooms = tuple(self._rooms.items())
+        for canvas_id, room in rooms:
+            async with room.lock:
+                await self._catch_up_room(canvas_id, room)
+            await self._close_broadcast_overflows(room)
 
     async def _guarded_send_loop(self, connection: Connection) -> None:
         try:
@@ -538,11 +636,8 @@ class CanvasRooms:
                         elif applied:
                             connection.history.record_edit(command.operation_id)
                             room.operation_origins[command.operation_id] = connection.id
-                            slow = [
-                                peer
-                                for peer in list(room.connections.values())
-                                if not self._enqueue_locked(room, peer, message)
-                            ]
+                            await self._catch_up_room(connection.canvas_id, room)
+                            slow = []
                         elif not revoked:
                             slow = (
                                 [connection]
@@ -582,11 +677,8 @@ class CanvasRooms:
                                     command.target_operation_id, command.operation_id
                                 )
                             room.operation_origins[command.operation_id] = connection.id
-                            slow = [
-                                peer
-                                for peer in list(room.connections.values())
-                                if not self._enqueue_locked(room, peer, message)
-                            ]
+                            await self._catch_up_room(connection.canvas_id, room)
+                            slow = []
                         elif not revoked:
                             slow = (
                                 [connection]
@@ -821,6 +913,7 @@ class CanvasRooms:
                         json.dumps(request),
                         json.dumps(result),
                     )
+                    await publish_canvas_operation(conn, connection.canvas_id, revision)
                     return result, True
         except asyncpg.UniqueViolationError:
             # A different canvas lock cannot serialize a globally unique operation ID.
@@ -947,6 +1040,12 @@ class CanvasRooms:
             self._detach_locked(room, connection)
             return False
 
+    def _enqueue_operation_locked(
+        self, room: Room, connection: Connection, event: dict[str, object]
+    ) -> None:
+        if not self._enqueue_locked(room, connection, event):
+            room.broadcast_overflows[connection.id] = connection
+
     def _broadcast_locked(
         self,
         room: Room,
@@ -1006,6 +1105,7 @@ class CanvasRooms:
         for task in serving:
             task.cancel()
         await asyncio.gather(*serving, return_exceptions=True)
+        await self._operation_listener.close()
         async with self._rooms_lock:
             rooms = list(self._rooms.items())
         connections: list[Connection] = []
