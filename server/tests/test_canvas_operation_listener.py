@@ -9,7 +9,7 @@ import unittest
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 from uuid import uuid4
 
 import asyncpg
@@ -321,6 +321,84 @@ class CanvasCrossInstancePostgresTests(unittest.TestCase):
                 _stop_backend(process_a)
                 _stop_backend(process_b)
 
+    def test_join_during_edit_gets_coherent_snapshot_then_ordered_operations(self):
+        with create_helpers.CanvasCreatePostgresTests()._board() as board:
+            process_a, url_a = _start_backend(board["url"])
+            process_b, url_b = _start_backend(board["url"], "snapshot_probe_app:app")
+            try:
+                _wait_for_backend(process_a, url_a)
+                _wait_for_backend(process_b, url_b)
+                with websocket_connect(
+                    _websocket_url(url_a, board["canvas_id"]),
+                    origin="http://localhost:5173",
+                    additional_headers={"Cookie": f"session={board['token_a']}"},
+                ) as editor:
+                    self.assertEqual(_receive_process_json(editor)["type"], "snapshot")
+                    try:
+                        with websocket_connect(
+                            _websocket_url(url_b, board["canvas_id"]),
+                            origin="http://localhost:5173",
+                            additional_headers={
+                                "Cookie": f"session={board['token_b']}"
+                            },
+                        ) as joiner:
+                            with urlopen(
+                                f"{url_b}/_test/snapshot-paused", timeout=15
+                            ) as response:
+                                self.assertEqual(response.status, 200)
+
+                            shape_id = uuid4()
+                            properties = create_helpers._shape_cases()[0][1]
+                            editor.send(
+                                json.dumps(
+                                    create_helpers._create(
+                                        uuid4(), shape_id, "rectangle", properties
+                                    )
+                                )
+                            )
+                            first_event = _receive_process_json(editor)
+                            self.assertEqual(first_event["canvas_revision"], 1)
+
+                            with urlopen(
+                                Request(
+                                    f"{url_b}/_test/release-snapshot", method="POST"
+                                ),
+                                timeout=5,
+                            ) as response:
+                                self.assertEqual(response.status, 200)
+
+                            snapshot = _receive_process_json(joiner)
+                            self.assertEqual(snapshot["type"], "snapshot")
+                            self.assertEqual(snapshot["canvas_revision"], 0)
+                            self.assertNotIn(
+                                str(shape_id),
+                                {shape["id"] for shape in snapshot["shapes"]},
+                            )
+
+                            editor.send(
+                                json.dumps(
+                                    {
+                                        "type": "shape.update",
+                                        "operation_id": str(uuid4()),
+                                        "shape_id": str(shape_id),
+                                        "expected_revision": 1,
+                                        "patch": {"x": properties["x"] + 1},
+                                    }
+                                )
+                            )
+                            second_event = _receive_process_json(editor)
+                            self.assertEqual(second_event["canvas_revision"], 2)
+                            events = _receive_process_operations(joiner, 2)
+                            self.assertEqual(events, [first_event, second_event])
+                            self.assertEqual(
+                                [event["canvas_revision"] for event in events], [1, 2]
+                            )
+                    finally:
+                        _release_snapshot_probe(url_b)
+            finally:
+                _stop_backend(process_a)
+                _stop_backend(process_b)
+
 
 def _websocket_app(database_url):
     @asynccontextmanager
@@ -339,7 +417,7 @@ def _websocket_app(database_url):
     return app
 
 
-def _start_backend(database_url):
+def _start_backend(database_url, app_module="app.main:app"):
     server_dir = os.path.dirname(os.path.dirname(__file__))
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
@@ -347,12 +425,15 @@ def _start_backend(database_url):
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["DATABASE_LISTENER_URL"] = database_url
+    env["PYTHONPATH"] = os.pathsep.join(
+        [os.path.join(server_dir, "tests"), server_dir, env.get("PYTHONPATH", "")]
+    )
     process = subprocess.Popen(
         [
             sys.executable,
             "-m",
             "uvicorn",
-            "app.main:app",
+            app_module,
             "--host",
             "127.0.0.1",
             "--port",
@@ -366,6 +447,16 @@ def _start_backend(database_url):
         stderr=subprocess.DEVNULL,
     )
     return process, f"http://127.0.0.1:{port}"
+
+
+def _release_snapshot_probe(base_url):
+    try:
+        with urlopen(
+            Request(f"{base_url}/_test/release-snapshot", method="POST"), timeout=2
+        ):
+            pass
+    except OSError:
+        pass
 
 
 def _wait_for_backend(process, base_url):
