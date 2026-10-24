@@ -4,12 +4,21 @@ import asyncpg
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
-    "postgres://whiteboard:whiteboard@localhost:5432/whiteboard",
+    os.environ.get(
+        "STORAGE_DATABASE_URL",
+        "postgres://whiteboard:whiteboard@localhost:5432/whiteboard",
+    ),
 )
 
 
 def get_listener_database_url() -> str:
-    return os.environ.get("DATABASE_LISTENER_URL", DATABASE_URL)
+    return (
+        os.environ.get("DATABASE_LISTENER_URL")
+        or os.environ.get("DATABASE_URL_UNPOOLED")
+        or os.environ.get("STORAGE_DATABASE_URL_UNPOOLED")
+        or os.environ.get("STORAGE_POSTGRES_URL_NON_POOLING")
+        or DATABASE_URL
+    )
 
 
 pool: asyncpg.Pool | None = None
