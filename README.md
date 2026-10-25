@@ -1,77 +1,85 @@
-# Mechanize Take-Home: Collaborative Whiteboard
+# Relay
 
-Thank you for taking the time to interview with Mechanize! This repo contains your assignment for the final phase of our interview process, an open-ended take-home assignment.
+Relay is a collaborative whiteboard for small teams. Create canvases, invite teammates, and work through ideas together in real time. Canvas edits are saved to PostgreSQL, so the team can return to them later.
 
-The take-home begins with a solo work block of three hours in which you can complete the task as described below.
+## Features
 
-There is a 20-minute break after the solo block. During this time, our team will review your submission. If we'd like to move forward based on your progress, we'll talk to you on the follow-up call. If not, we'll cancel the follow-up calendar invite and send you an email cancelling the call.
+- Username and password accounts
+- Create canvases and invite other users
+- Add and edit rectangles, ellipses, lines, and text
+- Move, resize, recolor, reorder, and delete shapes
+- Undo and redo canvas changes
+- See collaborators' cursors and live edits
+- Persist canvases and membership in PostgreSQL
 
+## Tech stack
 
-## Getting started
+- Frontend: React, TypeScript, and Vite
+- Backend: FastAPI and Python
+- Database: PostgreSQL
+- Live collaboration: WebSockets, with PostgreSQL notifications for durable cross-instance updates
+- Hosting: Vercel for the app and Neon for managed PostgreSQL
 
-1. **Clone this repo** (do _not_ fork it):
-   ```bash
-   git clone <this-repo-url>
-   cd <this-repo-name>
-   ```
-2. See `SETUP.md` for how to run the scaffold.
-3. Do all of your work on the **`main` branch**. Commit early and often.
-4. **Push your commits directly to `main`** — do not open a pull request.
-   ```bash
-   git push origin main
-   ```
-5. Your **final commit must be pushed no later than three hours** after your start time.
-   Anything pushed after the deadline will not be considered.
+## Run locally
 
-## What you're building
+### With Docker Compose
 
-A real-time collaborative whiteboard. Multiple users, same canvas, editing together.
+Requirements: Docker with Compose.
 
-## Deployment context
+From this directory, run:
 
-This whiteboard is for synchronous design reviews, consisting of a small group (typically 2-5 people) on a call together, using the canvas as a shared scratchpad while they talk through a design. 
-- Each user has an account and can create canvases or be invited to others'. 
-- It's common for several people to be editing at once -- often the same objects -- as they try alternatives or work through a disagreement in real time. 
-- A typical session runs 30-90 minutes. 
-- Teams sometimes return to a canvas in a later session to recall what was decided.
+```bash
+docker compose up --build
+```
 
-## Required features
+Compose starts PostgreSQL, initializes the schema and migrations, and runs the API and frontend. Open [http://localhost:5173](http://localhost:5173).
 
-- User accounts (signup, login, logout)
-- Create a canvas, open an existing canvas
-- Invite other users to a canvas (by username or email -- a simple mechanism is fine)
-- Shapes: rectangle, ellipse, line, text
-- Select, move, resize, delete, change color
-- Undo / redo
-- See other users' cursors
-- Canvas state persists across sessions
+### Without Docker Compose
 
-## Out of scope
+Requirements: Node.js 22+, Python 3.12+, and a PostgreSQL database. The default local database URL is `postgres://whiteboard:whiteboard@localhost:5432/whiteboard`.
 
-Don't spend time on these feature, as we won't evaluate them:
+Initialize the database and start the API:
 
-- Collaborative text editing within text elements (treating a text update as a single operation is fine -- you don't need to handle two users typing in the same text box simultaneously)
-- Granular permissions (viewer/editor/owner roles, share-with-link, etc.)
-- Rich text editing, images, or file uploads
-- Canvas zoom, pan, or infinite canvas
-- Export (PNG, SVG, PDF)
-- Version history or named snapshots
-- Mobile or touch support
+```bash
+cd server
+DATABASE_URL="${DATABASE_URL:-postgres://whiteboard:whiteboard@localhost:5432/whiteboard}"
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f schema.sql
+for migration in migrations/*.sql; do psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration"; done
+pip install -e .
+uvicorn app.main:app --reload --port 3001
+```
 
-## Provided scaffold
+In another terminal, start the frontend:
 
-This repository contains a minimal scaffold -- frontend, backend, and database wired together, but no whiteboard logic. You are free to restructure anything in the scaffold, but you are expected to stay within the provided stack; don't swap out the framework or database.
+```bash
+cd client
+npm install
+npm run dev
+```
 
-## How we evaluate
+The Vite development server proxies `/api` and `/ws` to the backend on port 3001.
 
-We evaluate whether your submission has a functional implementation of all required features above and is fit for the deployment context. Correctness and robustness for this use case and set of features matters more to us than other features beyond the required list, such as those listed as out of scope..
+## Deploy
 
-## Use of libraries
+The repository includes a Vercel configuration for the React frontend and FastAPI backend. Connect the repository to Vercel and connect a PostgreSQL database such as Neon.
 
-Don't pull in libraries that solve the core assignment for you (e.g. [tldraw](https://tldraw.dev/), [yjs](https://yjs.dev/)).
+Run `server/schema.sql`, followed by each SQL file in `server/migrations/` in filename order, against the deployed database. The SQL files are safe to rerun.
 
-The goal is to assess your engineering skills.
+Configure these backend environment variables in Vercel:
 
-## Use of AI
+- `WEBSOCKET_ALLOWED_ORIGINS`: the app's public origin, including `https://` and without a trailing slash (for example, `https://relay.example.com`). For multiple origins, separate them with commas.
+- `SESSION_COOKIE_SECURE`: set to `true` so session cookies are only sent over HTTPS.
+- Database connection: the Neon Vercel integration can provide `STORAGE_DATABASE_URL`. The backend also recognizes `DATABASE_URL`. For a separate, direct connection used by the cross-instance notification listener, it recognizes `DATABASE_LISTENER_URL`, `DATABASE_URL_UNPOOLED`, and Neon’s `STORAGE_DATABASE_URL_UNPOOLED` or `STORAGE_POSTGRES_URL_NON_POOLING`. When no listener-specific URL is set, it uses the main database URL.
 
-Use whatever AI tools you like. We recommend that you use frontier AI coding models. We are not aware of a candidate who has performed exceptionally on this take-home without using AI. However, note that you will be expected to **fully understand and defend** your implementation during the call after the solo block.
+Redeploy after changing environment variables. The `/api` and `/ws` routes are routed to the FastAPI service by `vercel.json`.
+
+## Project layout
+
+```text
+client/                 React application
+server/app/              FastAPI routes and collaboration logic
+server/schema.sql        Base PostgreSQL schema
+server/migrations/       Incremental database changes
+vercel.json              Vercel service and route configuration
+docker-compose.yml       Local development environment
+```
