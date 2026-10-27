@@ -1,7 +1,8 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { parseColorCode } from "../../editor/color.ts";
-import type { Shape } from "../../editor/types.ts";
+import type { LineArrowDefaults, Shape } from "../../editor/types.ts";
 import EditorIcon from "./EditorIcon.tsx";
+import LineStyleOptions from "./LineStyleOptions.tsx";
 
 export const EDITOR_COLORS = [
   { name: "Blue", value: "#dce6ff" },
@@ -33,7 +34,7 @@ export default function SelectionInspector({
   canSendToBack: boolean;
   onColor(color: string): void;
   onOpacity(opacity: number): void;
-  onLineArrow(key: "start_arrow" | "end_arrow", value: boolean): void;
+  onLineArrow(value: LineArrowDefaults): void;
   onBringToFront(): void;
   onSendToBack(): void;
   onDelete(): void;
@@ -76,8 +77,7 @@ export default function SelectionInspector({
       </section>
       {selected?.kind === "line" && <section className="inspector-section">
         <h3>Line ends</h3>
-        <label className="line-arrow-option"><input type="checkbox" aria-label="Start arrowhead" checked={selected.properties.start_arrow} disabled={disabled} onChange={(event) => onLineArrow("start_arrow", event.target.checked)} />Start arrowhead</label>
-        <label className="line-arrow-option"><input type="checkbox" aria-label="End arrowhead" checked={selected.properties.end_arrow} disabled={disabled} onChange={(event) => onLineArrow("end_arrow", event.target.checked)} />End arrowhead</label>
+        <LineStyleOptions value={selected.properties} disabled={disabled} onChange={onLineArrow} />
       </section>}
       <section className="inspector-section">
         <h3>{selected ? "Color" : "Default color"}</h3>
