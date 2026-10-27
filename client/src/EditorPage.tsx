@@ -9,7 +9,7 @@ import SelectionInspector from "./components/editor/SelectionInspector.tsx";
 import { BOARD_HEIGHT, BOARD_WIDTH, normalizedBox, previewShape, shapeBounds } from "./editor/geometry.ts";
 import { isTextWithinLimit } from "./editor/text.ts";
 import { useCanvasSession } from "./editor/useCanvasSession.ts";
-import type { Interaction, Point, ResizeHandle, Shape, Tool } from "./editor/types.ts";
+import type { Interaction, LineArrowDefaults, Point, ResizeHandle, Shape, Tool } from "./editor/types.ts";
 import "./EditorPage.css";
 
 export default function EditorPage() {
@@ -208,10 +208,14 @@ export default function EditorPage() {
     sendOperation({ type: "shape.update", operation_id: crypto.randomUUID(), shape_id: selected.id, expected_revision: selected.revision, patch }, { kind: "shape", shape });
   }, [editable, selected, sendOperation]);
 
-  const changeLineArrow = useCallback((key: "start_arrow" | "end_arrow", value: boolean) => {
-    if (selected?.kind !== "line" || !editable || selected.properties[key] === value) return;
-    const shape: Shape = { ...selected, properties: { ...selected.properties, [key]: value } };
-    sendOperation({ type: "shape.update", operation_id: crypto.randomUUID(), shape_id: selected.id, expected_revision: selected.revision, patch: { [key]: value } }, { kind: "shape", shape });
+  const changeLineArrow = useCallback((arrows: LineArrowDefaults) => {
+    if (selected?.kind !== "line" || !editable) return;
+    const patch: Partial<LineArrowDefaults> = {};
+    if (selected.properties.start_arrow !== arrows.start_arrow) patch.start_arrow = arrows.start_arrow;
+    if (selected.properties.end_arrow !== arrows.end_arrow) patch.end_arrow = arrows.end_arrow;
+    if (Object.keys(patch).length === 0) return;
+    const shape: Shape = { ...selected, properties: { ...selected.properties, ...patch } };
+    sendOperation({ type: "shape.update", operation_id: crypto.randomUUID(), shape_id: selected.id, expected_revision: selected.revision, patch }, { kind: "shape", shape });
   }, [editable, selected, sendOperation]);
 
   const moveSelectedToFront = useCallback(() => {
