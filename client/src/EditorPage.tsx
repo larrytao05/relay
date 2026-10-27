@@ -55,9 +55,11 @@ export default function EditorPage() {
       draftRef.current = { sessionId, value: "" };
       dispatch({ type: "interaction", interaction: { kind: "editingText", sessionId, shapeId: null, expectedRevision: null, start: { x, y }, width, height, color: state.defaultColor, fontSize: 16, draft: "" } });
     } else {
-      dispatch({ type: "interaction", interaction: { kind: "creating", shapeKind: state.tool, start: point, current: point, color: state.defaultColor } });
+      dispatch({ type: "interaction", interaction: state.tool === "line"
+        ? { kind: "creating", shapeKind: "line", start: point, current: point, color: state.defaultColor, ...state.lineArrowDefaults }
+        : { kind: "creating", shapeKind: state.tool, start: point, current: point, color: state.defaultColor } });
     }
-  }, [dispatch, editable, state.defaultColor, state.tool]);
+  }, [dispatch, editable, state.defaultColor, state.lineArrowDefaults, state.tool]);
 
   const beginMove = useCallback((shape: Shape, point: Point) => {
     if (!editable) return;
@@ -84,7 +86,7 @@ export default function EditorPage() {
       let shape: Shape | null = null;
       if (active.shapeKind === "line") {
         if (Math.hypot(point.x - active.start.x, point.y - active.start.y) >= 8) {
-          shape = { id: crypto.randomUUID(), kind: "line", revision: 1, deleted: false, properties: { x1: active.start.x, y1: active.start.y, x2: point.x, y2: point.y, color: active.color, opacity: 1, z_index: nextZIndex(state.shapes) } };
+          shape = { id: crypto.randomUUID(), kind: "line", revision: 1, deleted: false, properties: { x1: active.start.x, y1: active.start.y, x2: point.x, y2: point.y, color: active.color, opacity: 1, z_index: nextZIndex(state.shapes), start_arrow: active.start_arrow, end_arrow: active.end_arrow } };
         }
       } else {
         const box = normalizedBox(active.start, point, active.color);
@@ -206,6 +208,12 @@ export default function EditorPage() {
     sendOperation({ type: "shape.update", operation_id: crypto.randomUUID(), shape_id: selected.id, expected_revision: selected.revision, patch }, { kind: "shape", shape });
   }, [editable, selected, sendOperation]);
 
+  const changeLineArrow = useCallback((key: "start_arrow" | "end_arrow", value: boolean) => {
+    if (selected?.kind !== "line" || !editable || selected.properties[key] === value) return;
+    const shape: Shape = { ...selected, properties: { ...selected.properties, [key]: value } };
+    sendOperation({ type: "shape.update", operation_id: crypto.randomUUID(), shape_id: selected.id, expected_revision: selected.revision, patch: { [key]: value } }, { kind: "shape", shape });
+  }, [editable, selected, sendOperation]);
+
   const moveSelectedToFront = useCallback(() => {
     if (!selected || !editable) return;
     const highest = Math.max(...visibleShapes.map((shape) => shape.properties.z_index));
@@ -311,8 +319,8 @@ export default function EditorPage() {
           onCancelText={cancelText}
           onCursor={sendCursor}
         />
-        <SelectionInspector selected={selected} shapes={visibleShapes} defaultColor={state.defaultColor} disabled={!editable} canBringToFront={selectedLayer >= 0 && selectedLayer < orderedShapes.length - 1} canSendToBack={selectedLayer > 0} onColor={changeColor} onOpacity={(opacity) => changeAppearance({ opacity })} onBringToFront={moveSelectedToFront} onSendToBack={moveSelectedToBack} onDelete={deleteSelection} />
-        <EditorToolbar activeTool={state.tool} canUndo={state.undoIds.length > 0} canRedo={state.redoIds.length > 0} disabled={!editable} onTool={setTool} onUndo={undo} onRedo={redo} />
+        <SelectionInspector selected={selected} shapes={visibleShapes} defaultColor={state.defaultColor} disabled={!editable} canBringToFront={selectedLayer >= 0 && selectedLayer < orderedShapes.length - 1} canSendToBack={selectedLayer > 0} onColor={changeColor} onOpacity={(opacity) => changeAppearance({ opacity })} onLineArrow={changeLineArrow} onBringToFront={moveSelectedToFront} onSendToBack={moveSelectedToBack} onDelete={deleteSelection} />
+        <EditorToolbar activeTool={state.tool} lineArrowDefaults={state.lineArrowDefaults} onLineArrowDefaults={(values) => dispatch({ type: "line-arrow-defaults", ...values })} canUndo={state.undoIds.length > 0} canRedo={state.redoIds.length > 0} disabled={!editable} onTool={setTool} onUndo={undo} onRedo={redo} />
       </div>
       {(state.notice || state.recoveredTextDraft) && <div className="editor-notice" role={state.phase === "failed" || state.recoveredTextDraft ? "alert" : "status"}>
         {state.notice ?? "A text edit was interrupted before it could be saved."}

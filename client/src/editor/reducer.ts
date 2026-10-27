@@ -12,6 +12,7 @@ export type EditorAction =
   | { type: "connection.failed"; message: string }
   | { type: "tool"; tool: Tool }
   | { type: "color"; color: string }
+  | { type: "line-arrow-defaults"; start_arrow: boolean; end_arrow: boolean }
   | { type: "selection"; id: string | null }
   | { type: "interaction"; interaction: EditorState["interaction"] }
   | { type: "text.draft"; draft: string }
@@ -62,6 +63,7 @@ export function editorReducer(state: EditorState = initialEditorState, action: E
       ? state
       : { ...state, tool: action.tool, interaction: { kind: "idle" } };
     case "color": return { ...state, defaultColor: action.color };
+    case "line-arrow-defaults": return { ...state, lineArrowDefaults: { start_arrow: action.start_arrow, end_arrow: action.end_arrow } };
     case "selection": return { ...state, selectionId: action.id, interaction: { kind: "idle" } };
     case "interaction": return { ...state, interaction: action.interaction };
     case "text.draft": return state.interaction.kind === "editingText" ? { ...state, interaction: { ...state.interaction, draft: action.draft } } : state;

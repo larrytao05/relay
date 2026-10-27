@@ -104,6 +104,35 @@ class CanvasCreatePostgresTests(unittest.TestCase):
                         awaitable_result(self._state(board, op_id)), (1, 1, 1)
                     )
 
+    def test_legacy_line_create_retry_defaults_missing_arrow_flags(self):
+        with (
+            self._board() as board,
+            TestClient(app) as client,
+            self._socket(client, board, "token_a") as socket,
+        ):
+            _receive_json(socket)
+            operation_id, shape_id = uuid4(), uuid4()
+            properties = {
+                "x1": 1,
+                "y1": 2,
+                "x2": 30,
+                "y2": 40,
+                "color": "#112233",
+                "start_arrow": False,
+                "end_arrow": False,
+            }
+            command = _create(operation_id, shape_id, "line", properties)
+            socket.send_json(command)
+            original = _receive_json(socket)
+            asyncio.run(
+                self._remove_line_arrows_from_saved_request(board, operation_id)
+            )
+            socket.send_json(command)
+            self.assertEqual(_receive_json(socket), original)
+            changed = {**command, "properties": {**properties, "end_arrow": True}}
+            socket.send_json(changed)
+            self.assertEqual(_receive_json(socket)["code"], "operation_id_reused")
+
     def test_shape_id_reuse_does_not_advance_canvas_or_emit(self):
         with self._board() as board, TestClient(app) as client:  # noqa: SIM117
             with self._socket(client, board, "token_a") as socket:
@@ -389,6 +418,19 @@ class CanvasCreatePostgresTests(unittest.TestCase):
         finally:
             await conn.close()
 
+    async def _remove_line_arrows_from_saved_request(self, board, operation_id):
+        conn = await asyncpg.connect(board["url"])
+        try:
+            await conn.execute(
+                """UPDATE canvas_operation
+                   SET request = jsonb_set(request, '{properties}',
+                     (request->'properties') - 'start_arrow' - 'end_arrow')
+                   WHERE id=$1""",
+                operation_id,
+            )
+        finally:
+            await conn.close()
+
     async def _install_failing_operation_trigger(self, board):
         conn = await asyncpg.connect(board["url"])
         try:
@@ -482,6 +524,8 @@ def _shape_cases():
                 "color": "#112233",
                 "opacity": 1,
                 "z_index": 0,
+                "start_arrow": False,
+                "end_arrow": False,
             },
         ),
         (

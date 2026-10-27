@@ -96,6 +96,31 @@ class CanvasProtocolTests(unittest.TestCase):
         with self.assertRaises((TypeError, ValueError)):
             _validate_shape_properties("rectangle", {**base, "z_index": float("inf")})
 
+    def test_line_arrow_settings_default_and_require_booleans(self):
+        base = {"x1": 1, "y1": 2, "x2": 3, "y2": 4, "color": "#ffffff"}
+        self.assertEqual(
+            (
+                _validate_shape_properties("line", base)["start_arrow"],
+                _validate_shape_properties("line", base)["end_arrow"],
+            ),
+            (False, False),
+        )
+        for value in (1, "true", None):
+            with self.subTest(value=value), self.assertRaises((TypeError, ValueError)):
+                _validate_shape_properties("line", {**base, "start_arrow": value})
+        with self.assertRaises(ValueError):
+            _validate_shape_properties(
+                "rectangle",
+                {
+                    "x": 1,
+                    "y": 2,
+                    "width": 3,
+                    "height": 4,
+                    "color": "#ffffff",
+                    "start_arrow": True,
+                },
+            )
+
     def test_text_limit_counts_ascii_bmp_and_astral_code_points(self):
         base = {
             "x": 1,

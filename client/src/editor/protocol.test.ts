@@ -16,6 +16,14 @@ test("parses the actual snapshot shape and connection payload", () => {
   }
 });
 
+test("defaults legacy line ends and rejects malformed arrow settings", () => {
+  const legacy = { ...shape, kind: "line", properties: { x1: 1, y1: 2, x2: 3, y2: 4, color: "#abcdef" } };
+  const parsed = parseServerEvent(JSON.stringify({ type: "operation.applied", operation_id: "00000000-0000-4000-8000-000000000005", actor_id: user, kind: "create", target_operation_id: null, canvas_revision: 2, shape: legacy }));
+  assert.equal(parsed.type, "operation.applied");
+  if (parsed.type === "operation.applied" && parsed.shape.kind === "line") assert.deepEqual([parsed.shape.properties.start_arrow, parsed.shape.properties.end_arrow], [false, false]);
+  for (const value of ["true", 1, null]) assert.throws(() => parseServerEvent(JSON.stringify({ type: "operation.applied", operation_id: "00000000-0000-4000-8000-000000000005", actor_id: user, kind: "create", target_operation_id: null, canvas_revision: 2, shape: { ...legacy, properties: { ...legacy.properties, start_arrow: value } } })));
+});
+
 test("parses saved opacity and layer order and rejects invalid opacity", () => {
   const parsed = parseServerEvent(JSON.stringify({ type: "operation.applied", operation_id: "00000000-0000-4000-8000-000000000005", actor_id: user, kind: "update", target_operation_id: null, canvas_revision: 2, shape: { ...shape, properties: { ...shape.properties, opacity: 0.35, z_index: 8 } } }));
   assert.equal(parsed.type, "operation.applied");

@@ -1,4 +1,4 @@
-import type { Tool } from "../../editor/types.ts";
+import type { LineArrowDefaults, Tool } from "../../editor/types.ts";
 import EditorIcon, { type EditorIconName } from "./EditorIcon.tsx";
 
 const tools: { tool: Tool; icon: EditorIconName; label: string; shortcut: string }[] = [
@@ -11,6 +11,8 @@ const tools: { tool: Tool; icon: EditorIconName; label: string; shortcut: string
 
 export default function EditorToolbar({
   activeTool,
+  lineArrowDefaults,
+  onLineArrowDefaults,
   canUndo,
   canRedo,
   disabled,
@@ -19,6 +21,8 @@ export default function EditorToolbar({
   onRedo,
 }: {
   activeTool: Tool;
+  lineArrowDefaults: LineArrowDefaults;
+  onLineArrowDefaults(values: LineArrowDefaults): void;
   canUndo: boolean;
   canRedo: boolean;
   disabled: boolean;
@@ -27,6 +31,11 @@ export default function EditorToolbar({
   onRedo(): void;
 }) {
   return (
+    <>
+    {activeTool === "line" && <fieldset className="line-options"><legend>Line ends</legend>
+      <label><input type="checkbox" aria-label="Start arrowhead" checked={lineArrowDefaults.start_arrow} disabled={disabled} onChange={(event) => onLineArrowDefaults({ ...lineArrowDefaults, start_arrow: event.target.checked })} />Start arrowhead</label>
+      <label><input type="checkbox" aria-label="End arrowhead" checked={lineArrowDefaults.end_arrow} disabled={disabled} onChange={(event) => onLineArrowDefaults({ ...lineArrowDefaults, end_arrow: event.target.checked })} />End arrowhead</label>
+    </fieldset>}
     <div className="editor-toolbar" role="toolbar" aria-label="Drawing tools">
       {tools.map(({ tool, icon, label, shortcut }) => (
         <button key={tool} className={`editor-tool${activeTool === tool ? " is-active" : ""}`} type="button" aria-label={`${label} tool (${shortcut})`} aria-pressed={activeTool === tool} title={`${label} (${shortcut})`} disabled={disabled} onClick={() => onTool(tool)}>
@@ -37,5 +46,6 @@ export default function EditorToolbar({
       <button className="editor-tool" type="button" aria-label="Undo" title="Undo (Ctrl/Cmd+Z)" disabled={disabled || !canUndo} onClick={onUndo}><EditorIcon name="undo" /></button>
       <button className="editor-tool" type="button" aria-label="Redo" title="Redo (Ctrl/Cmd+Shift+Z)" disabled={disabled || !canRedo} onClick={onRedo}><EditorIcon name="redo" /></button>
     </div>
+    </>
   );
 }

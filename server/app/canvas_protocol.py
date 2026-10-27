@@ -17,7 +17,8 @@ _KIND_PROPERTIES: dict[str, frozenset[str]] = {
     | _APPEARANCE_PROPERTIES,
     "ellipse": frozenset({"x", "y", "width", "height", "color"})
     | _APPEARANCE_PROPERTIES,
-    "line": frozenset({"x1", "y1", "x2", "y2", "color"}) | _APPEARANCE_PROPERTIES,
+    "line": frozenset({"x1", "y1", "x2", "y2", "color", "start_arrow", "end_arrow"})
+    | _APPEARANCE_PROPERTIES,
     "text": frozenset({"x", "y", "width", "height", "text", "font_size", "color"})
     | _APPEARANCE_PROPERTIES,
 }
@@ -133,6 +134,8 @@ def _validate_shape_properties(kind: str, properties: object) -> dict[str, objec
         raise TypeError("Shape properties must be an object.")
     allowed = _KIND_PROPERTIES[kind]
     required = allowed - _APPEARANCE_PROPERTIES
+    if kind == "line":
+        required -= {"start_arrow", "end_arrow"}
     keys = set(properties)
     missing = required - keys
     unexpected = keys - allowed
@@ -142,6 +145,11 @@ def _validate_shape_properties(kind: str, properties: object) -> dict[str, objec
         raise ValueError("Shape properties contain unsupported fields.")
 
     result = {"opacity": 1, "z_index": 0, **properties}
+    if kind == "line":
+        for key in ("start_arrow", "end_arrow"):
+            value = result.setdefault(key, False)
+            if not isinstance(value, bool):
+                raise TypeError("Line arrowhead settings must be booleans.")
     coordinate_keys = {"x", "y", "x1", "y1", "x2", "y2"}
     for key in coordinate_keys & required:
         result[key] = _finite_number(result[key], "Coordinates")

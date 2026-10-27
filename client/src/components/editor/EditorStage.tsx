@@ -2,6 +2,7 @@ import { useRef, type PointerEvent as ReactPointerEvent, type KeyboardEvent as R
 import { BOARD_HEIGHT, BOARD_WIDTH, pointFromClient, shapeBounds } from "../../editor/geometry.ts";
 import { isTextWithinLimit, TEXT_LENGTH_ERROR_MESSAGE } from "../../editor/text.ts";
 import type { Interaction, Peer, Point, ResizeHandle, Shape, Tool } from "../../editor/types.ts";
+import LineRenderer from "./LineRenderer.tsx";
 
 export default function EditorStage({
   title,
@@ -215,8 +216,7 @@ function ShapeView({ shape }: { shape: Shape }) {
     return <g data-shape-id={shape.id} opacity={p.opacity}><ellipse cx={p.x + p.width / 2} cy={p.y + p.height / 2} rx={p.width / 2} ry={p.height / 2} fill={p.color} stroke={p.color} strokeWidth="1.5" /></g>;
   }
   if (shape.kind === "line") {
-    const p = shape.properties;
-    return <g data-shape-id={shape.id} opacity={p.opacity}><line x1={p.x1} y1={p.y1} x2={p.x2} y2={p.y2} fill="none" stroke="transparent" strokeWidth="12" pointerEvents="stroke" /><line x1={p.x1} y1={p.y1} x2={p.x2} y2={p.y2} fill="none" stroke={p.color} strokeWidth="2" vectorEffect="non-scaling-stroke" /></g>;
+    return <LineRenderer properties={shape.properties} shapeId={shape.id} />;
   }
   if (shape.kind !== "text") return null;
   const p = shape.properties;
@@ -240,7 +240,7 @@ function SelectionOutline({ shape }: { shape: Shape }) {
 
 function CreationPreview({ interaction }: { interaction: Extract<Interaction, { kind: "creating" }> }) {
   const { start, current, color } = interaction;
-  if (interaction.shapeKind === "line") return <line className="creation-preview" x1={start.x} y1={start.y} x2={current.x} y2={current.y} stroke={color} />;
+  if (interaction.shapeKind === "line") return <LineRenderer className="creation-preview" properties={{ x1: start.x, y1: start.y, x2: current.x, y2: current.y, color, opacity: 1, start_arrow: interaction.start_arrow, end_arrow: interaction.end_arrow }} />;
   const x = Math.min(start.x, current.x);
   const y = Math.min(start.y, current.y);
   const width = Math.abs(current.x - start.x);
