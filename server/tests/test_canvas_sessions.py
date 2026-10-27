@@ -25,8 +25,39 @@ from test_canvas_create import (
 
 from app.auth import PublicUser, hash_session_token
 from app.canvas_protocol import _CreateCommand, _UndoCommand
-from app.canvas_ws import CanvasRooms, Connection, Room, SessionIdentity
+from app.canvas_ws import (
+    CanvasRooms,
+    Connection,
+    Room,
+    SessionIdentity,
+    _requests_match,
+)
 from app.main import app
+
+
+class OperationRequestCompatibilityTests(unittest.TestCase):
+    def test_legacy_line_create_defaults_match_but_changed_flags_do_not(self):
+        old = {
+            "type": "shape.create",
+            "kind": "line",
+            "properties": {"x1": 1, "y1": 2, "x2": 3, "y2": 4},
+        }
+        current = {
+            **old,
+            "properties": {
+                **old["properties"],
+                "start_arrow": False,
+                "end_arrow": False,
+            },
+        }
+        self.assertTrue(_requests_match(old, current))
+        self.assertFalse(
+            _requests_match(
+                old,
+                {**current, "properties": {**current["properties"], "end_arrow": True}},
+            )
+        )
+        self.assertFalse(_requests_match(old, {**current, "shape_id": "different"}))
 
 
 @unittest.skipUnless(os.environ.get("TEST_DATABASE_URL"), "requires TEST_DATABASE_URL")

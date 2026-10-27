@@ -44,6 +44,11 @@ class PropertyConflictTests(unittest.TestCase):
                     )
                 )
 
+    def test_opposite_line_arrow_ends_merge_but_same_end_conflicts(self):
+        history = [operation(1), operation(2, {"start_arrow": True})]
+        self.assertTrue(can_merge_update(1, 2, {"end_arrow": True}, history))
+        self.assertFalse(can_merge_update(1, 2, {"start_arrow": False}, history))
+
     def test_a_change_then_undo_still_conflicts_with_the_same_property(self):
         history = [
             operation(1),

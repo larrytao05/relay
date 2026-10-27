@@ -16,7 +16,10 @@ export type LineProperties = AppearanceProperties & {
   x2: number;
   y2: number;
   color: string;
+  start_arrow: boolean;
+  end_arrow: boolean;
 };
+export type LineArrowDefaults = Pick<LineProperties, "start_arrow" | "end_arrow">;
 
 export type TextProperties = BoxProperties & {
   text: string;
@@ -48,7 +51,8 @@ export type ResizeHandle = "nw" | "ne" | "sw" | "se" | "start" | "end";
 
 export type Interaction =
   | { kind: "idle" }
-  | { kind: "creating"; shapeKind: "rectangle" | "ellipse" | "line"; start: Point; current: Point; color: string }
+  | { kind: "creating"; shapeKind: "rectangle" | "ellipse"; start: Point; current: Point; color: string }
+  | { kind: "creating"; shapeKind: "line"; start: Point; current: Point; color: string; start_arrow: boolean; end_arrow: boolean }
   | { kind: "moving"; shapeId: string; expectedRevision: number; baseline: Shape; start: Point; current: Point }
   | { kind: "resizing"; shapeId: string; expectedRevision: number; baseline: Shape; handle: ResizeHandle; start: Point; current: Point }
   | { kind: "editingText"; sessionId: string; shapeId: string | null; expectedRevision: number | null; start: Point; width: number; height: number; color: string; fontSize: number; draft: string };
@@ -89,6 +93,7 @@ export type EditorState = {
   peers: Record<string, Peer>;
   tool: Tool;
   defaultColor: string;
+  lineArrowDefaults: LineArrowDefaults;
   selectionId: string | null;
   interaction: Interaction;
   pending: PendingOperation | null;
@@ -109,6 +114,7 @@ export const initialEditorState: EditorState = {
   peers: {},
   tool: "select",
   defaultColor: "#f6e8bd",
+  lineArrowDefaults: { start_arrow: false, end_arrow: false },
   selectionId: null,
   interaction: { kind: "idle" },
   pending: null,

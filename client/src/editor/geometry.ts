@@ -4,6 +4,27 @@ export const BOARD_WIDTH = 820;
 export const BOARD_HEIGHT = 503;
 export const MIN_SIZE = 8;
 
+export function lineArrowheadPoints(x1: number, y1: number, x2: number, y2: number, atEnd: boolean): [number, number, number, number, number, number] | null {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const length = Math.hypot(dx, dy);
+  if (length === 0) return null;
+
+  const scale = Number.isFinite(length) ? 1 : Math.max(Math.abs(x1), Math.abs(y1), Math.abs(x2), Math.abs(y2));
+  const directionX = Number.isFinite(length) ? dx / length : (x2 / scale - x1 / scale) / Math.hypot(x2 / scale - x1 / scale, y2 / scale - y1 / scale);
+  const directionY = Number.isFinite(length) ? dy / length : (y2 / scale - y1 / scale) / Math.hypot(x2 / scale - x1 / scale, y2 / scale - y1 / scale);
+  const size = Math.min(12, Number.isFinite(length) ? length * 0.35 : 12);
+  const direction = atEnd ? -1 : 1;
+  const x = atEnd ? x2 : x1;
+  const y = atEnd ? y2 : y1;
+  const ux = directionX * direction;
+  const uy = directionY * direction;
+  const bx = x + ux * size;
+  const by = y + uy * size;
+  const half = size * 0.48;
+  return [x, y, bx - uy * half, by + ux * half, bx + uy * half, by - ux * half];
+}
+
 export function pointFromClient(svg: SVGSVGElement, clientX: number, clientY: number): Point | null {
   const matrix = svg.getScreenCTM();
   if (!matrix) return null;

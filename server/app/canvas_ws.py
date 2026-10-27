@@ -32,11 +32,33 @@ from app.canvas_protocol import (
     _RedoCommand,
     _UndoCommand,
     _UpdateCommand,
+    _validate_shape_properties,
 )
 from app.canvas_transient import CanvasTransientTransport, TransientPeer
 from app.db import get_pool
 
 logger = logging.getLogger(__name__)
+
+
+def _requests_match(saved: object, incoming: dict[str, object]) -> bool:
+    if not isinstance(saved, dict):
+        return False
+    left = dict(saved)
+    right = dict(incoming)
+    if (
+        left.get("type") == right.get("type") == "shape.create"
+        and left.get("kind") == right.get("kind") == "line"
+    ):
+        for request in (left, right):
+            properties = request.get("properties")
+            if isinstance(properties, dict):
+                normalized = dict(properties)
+                normalized.setdefault("start_arrow", False)
+                normalized.setdefault("end_arrow", False)
+                request["properties"] = normalized
+    return left == right
+
+
 _OPERATION_REPLAY_BATCH = 100
 
 
@@ -890,6 +912,8 @@ class CanvasRooms:
                                 "Shape is not available in this canvas.",
                             ), False
                         properties = _json_value(row["properties"])
+                        if row["kind"] == "line":
+                            properties = _validate_shape_properties("line", properties)
                         current_shape = {
                             "id": str(row["id"]),
                             "kind": row["kind"],
@@ -1081,7 +1105,7 @@ class CanvasRooms:
         if (
             previous["canvas_id"] == connection.canvas_id
             and previous["actor_id"] == connection.identity.user.id
-            and _json_value(previous["request"]) == request
+            and _requests_match(_json_value(previous["request"]), request)
             and isinstance(saved_result, dict)
         ):
             return saved_result
@@ -1118,7 +1142,7 @@ class CanvasRooms:
         if (
             winner["canvas_id"] == connection.canvas_id
             and winner["actor_id"] == connection.identity.user.id
-            and _json_value(winner["request"]) == request
+            and _requests_match(_json_value(winner["request"]), request)
             and isinstance(saved_result, dict)
         ):
             return saved_result

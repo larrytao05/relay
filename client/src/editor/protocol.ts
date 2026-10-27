@@ -97,8 +97,8 @@ function parseShape(value: unknown): Shape {
       if (!finite(properties.x) || !finite(properties.y) || !positive(properties.width) || !positive(properties.height)) throw new Error("The server sent invalid shape geometry.");
       return { ...base, kind: value.kind, properties: { x: properties.x, y: properties.y, width: properties.width, height: properties.height, color: properties.color, opacity, z_index: zIndex } };
     case "line":
-      if (!finite(properties.x1) || !finite(properties.y1) || !finite(properties.x2) || !finite(properties.y2)) throw new Error("The server sent invalid line geometry.");
-      return { ...base, kind: "line", properties: { x1: properties.x1, y1: properties.y1, x2: properties.x2, y2: properties.y2, color: properties.color, opacity, z_index: zIndex } };
+      if (!finite(properties.x1) || !finite(properties.y1) || !finite(properties.x2) || !finite(properties.y2) || (properties.start_arrow !== undefined && typeof properties.start_arrow !== "boolean") || (properties.end_arrow !== undefined && typeof properties.end_arrow !== "boolean")) throw new Error("The server sent invalid line properties.");
+      return { ...base, kind: "line", properties: { x1: properties.x1, y1: properties.y1, x2: properties.x2, y2: properties.y2, color: properties.color, opacity, z_index: zIndex, start_arrow: properties.start_arrow ?? false, end_arrow: properties.end_arrow ?? false } };
     case "text":
       if (!finite(properties.x) || !finite(properties.y) || !positive(properties.width) || !positive(properties.height) || !positive(properties.font_size) || typeof properties.text !== "string" || !isTextWithinLimit(properties.text)) throw new Error("The server sent invalid text properties.");
       return { ...base, kind: "text", properties: { x: properties.x, y: properties.y, width: properties.width, height: properties.height, color: properties.color, opacity, z_index: zIndex, text: properties.text, font_size: properties.font_size } };

@@ -1,5 +1,6 @@
 """WS-05 update/delete integration tests against a dedicated PostgreSQL DB."""
 
+import asyncio
 import json
 import os
 import threading
@@ -18,6 +19,61 @@ from app.main import app
 class CanvasEditPostgresTests(unittest.TestCase):
     def setUp(self):
         self.fixtures = create_helpers.CanvasCreatePostgresTests()
+
+    def test_first_arrow_edit_to_legacy_line_undoes_and_redoes(self):
+        with (
+            self.fixtures._board() as board,
+            TestClient(app) as client,
+            self.fixtures._socket(client, board, "token_a") as socket,
+        ):
+            create_helpers._receive_json(socket)
+            shape_id, create_id, update_id = uuid4(), uuid4(), uuid4()
+            properties = {
+                "x1": 1,
+                "y1": 2,
+                "x2": 30,
+                "y2": 40,
+                "color": "#112233",
+                "start_arrow": False,
+                "end_arrow": False,
+            }
+            socket.send_json(
+                create_helpers._create(create_id, shape_id, "line", properties)
+            )
+            self.assertEqual(
+                create_helpers._receive_json(socket)["type"], "operation.applied"
+            )
+            asyncio.run(self._remove_legacy_line_arrows(board, shape_id))
+
+            socket.send_json(_update(update_id, shape_id, 1, {"start_arrow": True}))
+            changed = create_helpers._receive_json(socket)
+            self.assertEqual(changed["type"], "operation.applied")
+            operation = create_helpers.awaitable_result(
+                self._operation(board, update_id)
+            )
+            self.assertEqual(
+                json.loads(operation["before_patch"]), {"start_arrow": False}
+            )
+
+            undo_id, redo_id = uuid4(), uuid4()
+            socket.send_json(
+                {
+                    "type": "undo",
+                    "operation_id": str(undo_id),
+                    "target_operation_id": str(update_id),
+                }
+            )
+            undone = create_helpers._receive_json(socket)
+            self.assertFalse(undone["shape"]["properties"]["start_arrow"])
+            socket.send_json(
+                {
+                    "type": "redo",
+                    "operation_id": str(redo_id),
+                    "target_operation_id": str(undo_id),
+                }
+            )
+            redone = create_helpers._receive_json(socket)
+            self.assertTrue(redone["shape"]["properties"]["start_arrow"])
 
     def test_stale_disjoint_update_merges_broadcasts_and_replays_exactly(self):
         with self.fixtures._board() as board, TestClient(app) as client:
@@ -319,6 +375,16 @@ class CanvasEditPostgresTests(unittest.TestCase):
         try:
             return await conn.fetchrow(
                 "SELECT revision, properties, deleted_at FROM shape WHERE id=$1",
+                shape_id,
+            )
+        finally:
+            await conn.close()
+
+    async def _remove_legacy_line_arrows(self, board, shape_id):
+        conn = await asyncpg.connect(board["url"])
+        try:
+            await conn.execute(
+                "UPDATE shape SET properties = properties - 'start_arrow' - 'end_arrow' WHERE id=$1",
                 shape_id,
             )
         finally:
